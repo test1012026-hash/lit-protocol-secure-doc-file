@@ -1,4 +1,5 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -9,6 +10,11 @@ const fileRoutes = require('./routes/files');
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
+
+app.get('/reset-password', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'reset-password.html'));
+});
+app.use(express.static(path.join(__dirname, 'public')));
 
 mongoose
   .connect(process.env.MONGODB_URI)

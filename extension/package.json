@@ -11,12 +11,16 @@
     "@lit-protocol/auth-helpers": "^7.0.4",
     "@lit-protocol/lit-node-client": "^7.0.4",
     "axios": "^1.7.2",
+    "buffer": "^6.0.3",
+    "ethers": "6.13.1",
+    "process": "^0.11.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.28",
     "@vitejs/plugin-react": "^4.3.1",
-    "vite": "^5.3.1"
+    "vite": "^5.3.1",
+    "vite-plugin-node-polyfills": "^0.28.0"
   }
 }

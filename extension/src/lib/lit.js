@@ -1,93 +1,93 @@
-import { LitNodeClient } from '@lit-protocol/lit-node-client';
-import { LIT_NETWORK, GOOGLE_CLIENT_ID } from './config';
+import { GOOGLE_CLIENT_ID, LIT_API_KEY, LIT_PKP_ID } from "./config";
 
-let litClient;
-let connectingPromise;
+const LIT_API_BASE = "https://api.chipotle.litprotocol.com/core/v1";
 
-// Guards against a race condition: if two calls (e.g. encrypt + decrypt,
-// or a double-click) both invoke getLitClient() before the first connect()
-// resolves, they must share the same in-flight connection instead of one
-// of them getting back a client that isn't ready yet.
-async function getLitClient() {
-  if (litClient) return litClient;
-  if (!connectingPromise) {
-    const client = new LitNodeClient({
-      litNetwork: "datil-dev", // you imported this but hardcoded 'datil-dev' below — use it
-      debug: true,
-    });
-    connectingPromise = client.connect().then(() => {
-      litClient = client;
-      return litClient;
-    }).catch((err) => {
-      connectingPromise = null; // let a future call retry instead of being stuck forever
-      console.error(err);
-      throw err;
-    });
+async function callLitAction(code, jsParams) {
+  const res = await fetch(`${LIT_API_BASE}/lit_action`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Api-Key": LIT_API_KEY,
+    },
+    body: JSON.stringify({ code, jsParams }),
+  });
+
+  if (res.status === 402) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(
+      `Lit account has insufficient credits (402 Payment Required). Add funds in the Chipotle Dashboard (card or ETH/USDC/SOL/LITKEY, $5 min). Details: ${errBody}`,
+    );
   }
-  return connectingPromise;
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`Lit Action HTTP ${res.status}: ${errBody}`);
+  }
+
+  const data = await res.json();
+  if (data.has_error) {
+    throw new Error(data.logs || "Lit Action execution failed");
+  }
+  return data.response;
 }
 
-// This is the access-control logic. It runs on the Lit nodes themselves
-// (not on your server, not on the client) and only authorizes releasing
-// the decryption key if the caller's Google ID token belongs to the
-// intended recipient's email address.
-function buildAccessLitAction() {
-  return `
-    const go = async () => {
+export async function encryptForRecipient(message) {
+  const code = `
+    async function main({ pkpId, message }) {
+      const ciphertext = await Lit.Actions.encrypt({ pkpId, message });
+      return { ciphertext };
+    }
+  `;
+
+  const result = await callLitAction(code, {
+    pkpId: LIT_PKP_ID,
+    message,
+  });
+
+  return { ciphertext: result.ciphertext };
+}
+
+export async function decryptFile({
+  ciphertext,
+  expectedEmail,
+  googleIdToken,
+}) {
+  const code = `
+    async function main({ pkpId, ciphertext, googleIdToken, expectedEmail, googleClientId }) {
       try {
         const res = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + googleIdToken);
         const payload = await res.json();
+
         const authorized = !!payload.email &&
           payload.email.toLowerCase() === expectedEmail.toLowerCase() &&
           payload.aud === googleClientId;
-        Lit.Actions.setResponse({ response: authorized ? 'true' : 'false' });
+
+        if (!authorized) {
+          return { authorized: false };
+        }
+
+        const plaintext = await Lit.Actions.decrypt({ pkpId, ciphertext });
+        return { authorized: true, plaintext };
       } catch (e) {
-        Lit.Actions.setResponse({ response: 'false' });
+        return { authorized: false, error: String(e) };
       }
-    };
-    go();
+    }
   `;
-}
 
-export async function encryptForRecipient(bytes) {
-  const client = await getLitClient();
-  const litActionCode = buildAccessLitAction();
-console.log("client",client)
-  // NOTE: unifiedAccessControlConditions below is a placeholder shape.
-  // Check the current Lit SDK version's docs for the exact encrypt()
-  // signature and how it pairs with a custom Lit Action for gating -
-  // the API has changed across SDK versions.
-  const { ciphertext, dataToEncryptHash } = await client.encrypt({
-    dataToEncrypt: bytes,
-    unifiedAccessControlConditions: [
-      {
-        conditionType: 'evmBasic',
-        contractAddress: '',
-        standardContractType: '',
-        chain: 'ethereum',
-        method: '',
-        parameters: [':userAddress'],
-        returnValueTest: { comparator: '=', value: 'placeholder' }
-      }
-    ]
+  const result = await callLitAction(code, {
+    pkpId: LIT_PKP_ID,
+    ciphertext,
+    googleIdToken,
+    expectedEmail,
+    googleClientId: GOOGLE_CLIENT_ID,
   });
 
-  return { ciphertext, dataToEncryptHash, litActionCode };
-}
-
-export async function decryptFile({ ciphertext, dataToEncryptHash, litActionCode, expectedEmail, googleIdToken }) {
-  const client = await getLitClient();
-
-  const sessionSigs = await client.getLitActionSessionSigs({
-    litActionCode,
-    jsParams: { googleIdToken, expectedEmail, googleClientId: GOOGLE_CLIENT_ID },
-    resourceAbilityRequests: [
-      {
-        resource: { resource: '*', resourcePrefix: 'lit-accesscontrolcondition' },
-        ability: 'access-control-condition-decryption'
-      }
-    ]
-  });
-
-  return client.decrypt({ ciphertext, dataToEncryptHash, sessionSigs });
+  if (!result.authorized) {
+    throw new Error(
+      result.error
+        ? `Not authorized: ${result.error}`
+        : "Not authorized to decrypt this file",
+    );
+  }
+  return result.plaintext;
 }
