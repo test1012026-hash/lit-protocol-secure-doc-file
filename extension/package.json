@@ -8,14 +8,19 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@lit-protocol/auth-helpers": "^7.0.4",
-    "@lit-protocol/lit-node-client": "^7.0.4",
+    "@lit-protocol/access-control-conditions": "^8.0.2",
+    "@lit-protocol/auth": "^8.2.3",
+    "@lit-protocol/lit-client": "^8.3.1",
+    "@lit-protocol/networks": "^8.4.1",
+    "@solana/web3.js": "^1.98.4",
     "axios": "^1.7.2",
+    "bs58": "^5.0.0",
     "buffer": "^6.0.3",
-    "ethers": "6.13.1",
     "process": "^0.11.10",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tweetnacl": "^1.0.3",
+    "viem": "^2.38.3"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.28",

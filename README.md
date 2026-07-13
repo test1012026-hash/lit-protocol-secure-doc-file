@@ -1,63 +1,90 @@
 # SecureDocShare
 
-Chrome extension (React) + Node/Express + MongoDB backend for sending a document that only the intended recipient can decrypt, using Lit Protocol for encryption and access control.
+Chrome extension + Node/Express + MongoDB app for sending encrypted documents. Only the intended recipient can decrypt them, using **Lit Protocol v3 (Chipotle)** and Google identity checks.
+
+---
 
 ## Prerequisites
 
-Before you start, make sure you have:
+| Requirement | Notes |
+|---|---|
+| **Node.js 18+** and npm | [nodejs.org](https://nodejs.org) |
+| **MongoDB** | Local install or [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) |
+| **Google Chrome** | Required to load the extension |
+| **Google Cloud OAuth client** | For “Continue with Google” |
+| **Lit v3 account** | API key + PKP ID from the [Lit Dashboard](https://dashboard.dev.litprotocol.com) |
+| **Alchemy Solana API key** (optional) | Improves Solana RPC; public devnet works without it |
 
-- **Node.js 18+** and npm
-- **MongoDB** — local install or a [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) cluster
-- **Google Chrome**
-- **Google Cloud OAuth client** — for “Continue with Google” sign-in
-- **Lit Protocol account** — API key and PKP ID from the [Lit developer dashboard](https://developer.litprotocol.com)
+---
 
 ## Project structure
 
 ```
 lit-protocol-secure-doc-file/
-├── server/       Node/Express + MongoDB API
-└── extension/    React popup, built with Vite + CRXJS (Manifest V3)
+├── server/          Express API + MongoDB
+│   ├── .env.example
+│   └── index.js
+└── extension/       Chrome extension (React + Vite + CRXJS)
+    ├── .env.example
+    ├── manifest.json
+    ├── dist/        ← load this folder in Chrome
+    └── src/
 ```
 
 ---
 
-## Step 1 — Start MongoDB
+## Quick start (checklist)
 
-If you use a local database, start MongoDB before the backend.
+1. Start MongoDB  
+2. Configure and run the **server**  
+3. Configure and build the **extension**  
+4. Load `extension/dist` in Chrome  
+5. Finish Google OAuth with the extension ID  
+6. Sign up → Send a file → Decrypt in Inbox  
 
-Example connection string (used in the next step):
+---
+
+## 1. Start MongoDB
+
+Local example URI:
 
 ```
 mongodb://localhost:27017/secure-doc-share
 ```
 
+If you use Atlas, copy the connection string from the Atlas UI.
+
 ---
 
-## Step 2 — Configure and run the backend
+## 2. Server setup and run
+
+Open a terminal:
 
 ```bash
 cd server
 npm install
 ```
 
-Copy the example env file and edit it:
+Create your env file:
 
 ```bash
-cp .env.example .env        # macOS / Linux
-copy .env.example .env      # Windows CMD
+# macOS / Linux
+cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
 Edit `server/.env`:
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | No | API port (default `4000`) |
-| `APP_URL` | Yes | Public URL of this server (e.g. `http://localhost:4000`) |
+| `PORT` | No | Default `4000` |
+| `APP_URL` | Yes | Public URL of this server, e.g. `http://localhost:4000` |
 | `MONGODB_URI` | Yes | MongoDB connection string |
-| `JWT_SECRET` | Yes | Long random string for signing JWTs |
-| `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID (must match the extension) |
-| `SMTP_*` | No | Email settings for password-reset links; if omitted, reset links print in the server console |
+| `JWT_SECRET` | Yes | Long random string for JWTs |
+| `GOOGLE_CLIENT_ID` | Yes | Same Google OAuth client ID used by the extension |
+| `SMTP_*` | No | Password-reset emails; if omitted, reset links print in the server console |
 
 Start the API:
 
@@ -65,135 +92,86 @@ Start the API:
 npm run dev
 ```
 
-Verify it is running:
+You should see:
+
+```
+MongoDB connected
+Server running on port 4000
+```
+
+Check health:
 
 ```bash
 curl http://localhost:4000/api/health
 ```
 
-Expected response: `{"ok":true}`
+Expected:
+
+```json
+{"ok":true}
+```
+
+Keep this terminal running.
 
 ---
 
-## Step 3 — Configure the extension
+## 3. Extension setup
+
+Open a **second** terminal:
 
 ```bash
 cd extension
 npm install
 ```
 
-Copy the example env file:
+Create your env file:
 
 ```bash
-cp .env.example .env        # macOS / Linux
-copy .env.example .env      # Windows CMD
+# macOS / Linux
+cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
-Edit `extension/.env`. All extension config lives here — **do not hardcode secrets in source files**.
+Edit `extension/.env`:
 
 | Variable | Required | Description |
 |---|---|---|
 | `VITE_API_BASE_URL` | Yes | Backend API URL (default `http://localhost:4000/api`) |
-| `VITE_GOOGLE_CLIENT_ID` | Yes | Same value as `GOOGLE_CLIENT_ID` in `server/.env` |
-| `VITE_EXTENSION_ID` | Yes | Chrome extension ID (see Step 4) |
-| `VITE_LIT_NETWORK` | No | Lit network name (default `datil-dev`) |
-| `VITE_LIT_API_KEY` | Yes | Lit API key |
+| `VITE_GOOGLE_CLIENT_ID` | Yes | Same as `GOOGLE_CLIENT_ID` in `server/.env` |
+| `VITE_EXTENSION_ID` | Yes | Chrome extension ID (set after first load — see below) |
+| `VITE_LIT_API_BASE` | No | Default `https://api.chipotle.litprotocol.com/core/v1` |
+| `VITE_LIT_API_KEY` | Yes | Lit v3 API key |
 | `VITE_LIT_PKP_ID` | Yes | Lit PKP ID used for encrypt/decrypt |
-| `VITE_POLYGON_API_KEY` | Yes* | Alchemy (or other) RPC key for Polygon Amoy |
-| `VITE_POLYGON_PRIVATE_*` | Yes* | Polygon wallet credentials used by wallet helpers |
+| `VITE_SOLANA_ALCHEMY_API_KEY` | No | Alchemy Solana key (recommended) |
+| `VITE_SOLANA_NETWORK` | No | `devnet` or `mainnet-beta` (default `devnet`) |
+| `VITE_SOLANA_PUBLIC_KEY` | No | Optional Solana test wallet pubkey |
+| `VITE_SOLANA_SECRET_KEY` | No | Optional Solana test wallet secret (base58) |
 
-\* Required if you use the Polygon wallet features in the extension.
-
-Also update `extension/manifest.json` so the OAuth client ID matches your env:
+Also set the same Google client ID in `extension/manifest.json`:
 
 ```json
 "oauth2": {
   "client_id": "<same-as-VITE_GOOGLE_CLIENT_ID>",
-  ...
+  "scopes": ["openid", "email", "profile"]
 }
 ```
 
-> **Important:** Restart `npm run dev` after changing `.env`. Vite reads env vars at startup.
+> Vite only reads `.env` at startup. Restart `npm run dev` / rebuild after env changes.
 
 ---
 
-## Step 4 — Google OAuth (Chrome extension)
-
-Google sign-in requires a matching OAuth client, extension ID, and redirect URI.
-
-1. Open [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials).
-2. Create an OAuth 2.0 Client ID:
-   - Type: **Chrome extension**, or **Web application** if Chrome extension is unavailable.
-3. Build or run the extension once (Step 5), then load it in Chrome.
-4. On `chrome://extensions`, copy the **Extension ID**.
-5. Set that ID in `extension/.env` as `VITE_EXTENSION_ID`.
-6. Add these **Authorized redirect URIs** to the OAuth client (replace `<EXTENSION_ID>`):
-
-   ```
-   https://<EXTENSION_ID>.chromiumapp.org
-   https://<EXTENSION_ID>.chromiumapp.org/
-   ```
-
-   You can also confirm the redirect URL from the extension service worker console:
-
-   ```js
-   chrome.identity.getRedirectURL()
-   ```
-
-### Optional: pin a stable extension ID
-
-To keep the same extension ID across reloads (recommended for OAuth setup):
-
-```bash
-node scripts/setup-extension-key.mjs
-```
-
-This writes a public key into `manifest.json` and prints the pinned extension ID. Put that ID in `VITE_EXTENSION_ID` and register the redirect URIs above in Google Cloud.
-
----
-
-## Step 5 — Lit Protocol
-
-The extension calls Lit Actions over HTTP from `extension/src/lib/lit.js`:
-
-- `encryptForRecipient()` — encrypts file content client-side via a Lit Action
-- `decryptFile()` — runs a Lit Action that verifies the recipient’s Google ID token before decrypting
-
-You need:
-
-1. A **Lit API key** (`VITE_LIT_API_KEY`) from the Lit dashboard
-2. A **PKP ID** (`VITE_LIT_PKP_ID`) tied to your Lit account
-3. **Sufficient Lit credits** — a `402 Payment Required` response means the account needs funding
-
-Docs: https://developer.litprotocol.com
-
----
-
-## Step 6 — Run the extension
+## 4. Build the extension
 
 ### Development (hot reload)
-
-In a **second terminal** (keep the backend running in the first):
 
 ```bash
 cd extension
 npm run dev
 ```
 
-Vite prints:
-
-```
-CRXJS: Load dist as unpacked extension
-```
-
-Load the extension in Chrome:
-
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked**
-4. Select the `extension/dist` folder (not the repo root)
-
-Leave `npm run dev` running while you develop. Reload the extension in Chrome when prompted or after manifest changes.
+Vite builds into `extension/dist` and watches for changes.
 
 ### Production build
 
@@ -202,49 +180,156 @@ cd extension
 npm run build
 ```
 
-Then load `extension/dist` the same way in Chrome.
+---
+
+## 5. Install in Chrome
+
+1. Open Chrome and go to:
+
+   ```
+   chrome://extensions
+   ```
+
+2. Turn on **Developer mode** (top-right toggle).
+
+3. Click **Load unpacked**.
+
+4. Select this folder (not the repo root):
+
+   ```
+   lit-protocol-secure-doc-file/extension/dist
+   ```
+
+5. Confirm **SecureDocShare** appears in the list and is enabled.
+
+6. Pin it (puzzle icon → pin) so you can open the popup easily.
+
+7. Copy the **Extension ID** shown under the extension name (e.g. `gljjkimecepnndocjchjabdmiogdapeb`).
+
+8. Put that ID in `extension/.env`:
+
+   ```env
+   VITE_EXTENSION_ID=your-extension-id-here
+   ```
+
+9. Restart the extension build (`Ctrl+C`, then `npm run dev` or `npm run build`), then click **Reload** on the extension card in `chrome://extensions`.
+
+### Pin a stable extension ID (recommended)
+
+So the ID does not change between machines/reloads:
+
+```bash
+cd extension
+node scripts/setup-extension-key.mjs
+```
+
+This writes a `key` into `manifest.json` and prints the pinned ID. Use that value for `VITE_EXTENSION_ID` and Google OAuth redirect URIs.
 
 ---
 
-## Step 7 — Smoke test
+## 6. Google OAuth setup
 
-1. **Backend** — `http://localhost:4000/api/health` returns `{"ok":true}`.
-2. **Extension popup** — click the SecureDocShare icon; the login screen loads without console errors.
-3. **Sign up** — create an account with email/password, or use **Continue with Google**.
-4. **Send** — log in as sender, pick a recipient email and file, send.
-5. **Inbox** — log in as recipient, open **Inbox**, decrypt the file.
+1. Open [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials).
+2. Create an **OAuth 2.0 Client ID** (Chrome extension type if available, otherwise Web application).
+3. Add authorized redirect URIs (replace `<EXTENSION_ID>` with your real ID):
 
-Password reset (optional): request a reset link; without SMTP configured, the link appears in the server terminal.
+   ```
+   https://<EXTENSION_ID>.chromiumapp.org
+   https://<EXTENSION_ID>.chromiumapp.org/
+   ```
+
+4. Use the same client ID in:
+   - `server/.env` → `GOOGLE_CLIENT_ID`
+   - `extension/.env` → `VITE_GOOGLE_CLIENT_ID`
+   - `extension/manifest.json` → `oauth2.client_id`
+
+To confirm the redirect URI from the extension service worker console:
+
+```js
+chrome.identity.getRedirectURL()
+```
 
 ---
 
-## How the pieces fit together
+## 7. Lit Protocol v3 (Chipotle)
 
-1. Sender signs up or logs in (email/password or Google) → backend returns a JWT and user UUID.
-2. Sender picks a recipient email and file. The extension encrypts the file with Lit, embedding a Lit Action that checks whether the caller is the intended recipient.
-3. Extension calls `POST /api/files/send`. The backend finds or creates the recipient user record.
-4. Recipient opens the extension, signs in, and sees the file in **Inbox**.
-5. On **Decrypt**, the extension passes the recipient’s Google ID token to Lit. Lit only returns decryption key shares if the token email matches.
-6. Decrypted bytes are saved via `chrome.downloads.download()`.
+Datil and Naga networks are retired. This app uses Lit v3 Chipotle over HTTP.
+
+1. Sign up at the [Lit Dashboard](https://dashboard.dev.litprotocol.com).
+2. Create an API key and a PKP.
+3. Set in `extension/.env`:
+
+   ```env
+   VITE_LIT_API_KEY=your-api-key
+   VITE_LIT_PKP_ID=your-pkp-id
+   ```
+
+4. Ensure the account has credits (a `402` error means funding is needed).
+
+**Flow:**
+
+- **Encrypt** — extension calls Chipotle; file bytes are encrypted with the PKP  
+- **Decrypt** — Lit Action verifies the recipient’s Google ID token email, then decrypts  
+
+Docs: [developer.litprotocol.com](https://developer.litprotocol.com)
 
 ---
 
-## Environment files (summary)
+## 8. Smoke test
+
+With server and extension both running:
+
+1. Open the SecureDocShare popup.  
+2. Sign up with email/password, or use **Continue with Google**.  
+3. On **Send**, enter a recipient email, pick a file, click **Encrypt and send**.  
+4. Sign in as the recipient (or another account with that email).  
+5. Open **Inbox** → **Decrypt** → the file should download.
+
+Password reset (optional): request a reset; without SMTP, the link is printed in the server terminal.
+
+---
+
+## How it works
+
+1. User logs in → server returns a JWT and user UUID.  
+2. Sender picks recipient email + file → extension encrypts via Lit Chipotle.  
+3. Extension posts ciphertext to `POST /api/files/send`.  
+4. Recipient signs in and sees the file in Inbox.  
+5. On decrypt, extension sends the Google ID token into a Lit Action that checks email + `aud`, then decrypts.  
+6. Decrypted bytes are saved with `chrome.downloads.download()`.
+
+---
+
+## Environment files
 
 | File | Purpose |
 |---|---|
-| `server/.env` | Backend secrets and config |
-| `server/.env.example` | Template for backend env |
-| `extension/.env` | Extension secrets and config (Vite `VITE_*` vars) |
-| `extension/.env.example` | Template for extension env |
+| `server/.env` | Backend secrets |
+| `server/.env.example` | Backend template |
+| `extension/.env` | Extension Vite `VITE_*` config |
+| `extension/.env.example` | Extension template |
 
-Neither `.env` file should be committed — they are listed in `.gitignore`.
+Do not commit `.env` files (they are gitignored).
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Extension fails to load / empty content script | Rebuild (`npm run build`) and reload; load `extension/dist`, not the repo root |
+| `Extension ID mismatch` | Set `VITE_EXTENSION_ID` to the ID on `chrome://extensions`, rebuild, reload |
+| Google `redirect_uri_mismatch` | Add `https://<EXTENSION_ID>.chromiumapp.org` in Google Cloud Console |
+| Backend not reachable | Confirm `npm run dev` in `server/` and `VITE_API_BASE_URL=http://localhost:4000/api` |
+| Lit `402 Payment Required` | Add credits in the Lit Dashboard |
+| Decrypt fails for old files | Re-send the file; older ciphertext formats may not match the current Lit Action |
+| Popup shows “Loading…” forever | Check the service worker / popup console for missing env vars |
 
 ---
 
 ## Security notes
 
-- Access control is enforced by Lit running your Lit Action — not by your server alone — so a compromised backend cannot decrypt file contents on its own.
-- The Lit Action verifies the Google ID token via `https://oauth2.googleapis.com/tokeninfo` and checks both the email and `aud` (your OAuth client ID). Do not remove the `aud` check.
-- Passwords are hashed with bcrypt; never log or store plaintext passwords.
-- Treat `JWT_SECRET`, Lit API keys, and wallet private keys as credentials. Keep them in `.env` only.
+- Lit enforces decrypt gating inside the Lit Action; a compromised backend alone cannot decrypt ciphertext.  
+- The Lit Action verifies Google tokens via `oauth2.googleapis.com/tokeninfo` and checks email + `aud`.  
+- Passwords are hashed with bcrypt.  
+- Keep `JWT_SECRET`, Lit API keys, and wallet secrets only in `.env`.
