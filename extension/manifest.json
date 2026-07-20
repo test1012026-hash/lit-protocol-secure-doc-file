@@ -32,6 +32,7 @@
     "https://*.solana.com/*",
     "https://*.g.alchemy.com/*",
     "http://localhost:4000/*",
+    "https://*.onrender.com/*",
     "https://mail.google.com/*"
   ],
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0cR0s14fYpyA8pqi8+gVsO6Jb61mJB7H2scT0VCnux0ElxQ2DlQXn1FYQt5NiTHTK63TDGiuQs0mmP/py5rVk76ptBLE/TRvRnj+P3eYeRBwu7KHi+oLM2hRv+52+48WdbKvANG/8fBO8Zncn9WJw4+gEwMjtkYJMXfOqFfXC0pDNB0y2pNICAxNWyo5wIpdZxUv/YwtgvPCFPyGy0ZD8J08meI8tf3UfdwrX+VoxH9Gr6HU9B76/4qEp3rUCtTd91IEJFXqq/5zboxEQma90R4b545H0qsi0PjidtVuqIbEIUAmSxmeltzMMfWv2fgfs5CvcdS95YsPRAeVH+v7PwIDAQAB"

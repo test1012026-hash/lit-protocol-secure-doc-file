@@ -56,6 +56,7 @@ router.post(
   validateBody(sendFileSchema),
   async (req, res) => {
     try {
+      console.log("req.body -->",req.body);
       const {
         recipientEmail,
         subject,
@@ -65,17 +66,19 @@ router.post(
         encryptedPackageName,
         recipientUuid,
       } = req.body;
-
+      console.log("recipientEmail -->",recipientEmail);
       const recipient = await ensureRecipientByEmail(recipientEmail);
-
+      console.log("recipient -->",recipient);
       if (recipientUuid && recipient.uuid !== recipientUuid) {
         return res.status(400).json({
           error:
             "Recipient UUID mismatch. Re-fetch recipient and encrypt again.",
         });
       }
-
+      console.log("subject -->",subject);
+      console.log("filename -->",filename);
       const normalizedSubject = subject || filename || "Untitled document";
+      console.log("normalizedSubject -->",normalizedSubject);
       const emailSent = await sendEncryptedFileEmail({
         to: recipientEmail,
         senderEmail: req.user.email,
@@ -86,12 +89,15 @@ router.post(
         demoMode: DEMO_MODE,
       });
 
+      console.log("emailSent -->",emailSent);
+
       res.json({
         recipientUuid: recipient.uuid,
         recipientClaimed: recipient.claimed,
         emailSent,
       });
     } catch (err) {
+      console.log("err -->",err);
       res.status(500).json({ error: err.message });
     }
   },
