@@ -1,7 +1,10 @@
 import axios from 'axios';
 import { API_BASE_URL } from './config';
 
-const client = axios.create({ baseURL: API_BASE_URL });
+const client = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 60_000,
+});
 
 function authHeader(token) {
   return { headers: { Authorization: `Bearer ${token}` } };

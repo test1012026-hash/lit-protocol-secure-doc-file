@@ -25,6 +25,9 @@ function getTransporter() {
       user: SMTP_USER,
       pass: SMTP_PASS.replace(/\s+/g, ""),
     },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
   });
 
   return transporter;
@@ -110,6 +113,7 @@ async function sendEncryptedFileEmail({
   ].join("");
 
   const transport = getTransporter();
+  console.log("transport -->",transport);
   if (!transport) {
     console.log(`[mail] SMTP not configured. Secure file email for ${to}:`);
     console.log(`  From: ${senderEmail}, Subject: ${subject}`);
@@ -117,21 +121,26 @@ async function sendEncryptedFileEmail({
     return false;
   }
 
-  await transport.sendMail({
-    from,
-    to,
-    subject: mailSubject,
-    text,
-    html,
-    attachments: [
-      {
-        filename: attachmentName,
-        content: Buffer.from(attachmentBase64, "base64"),
-        contentType: "application/octet-stream",
-      },
-    ],
-  });
-  return true;
+  try {
+    await transport.sendMail({
+      from,
+      to,
+      subject: mailSubject,
+      text,
+      html,
+      attachments: [
+        {
+          filename: attachmentName,
+          content: Buffer.from(attachmentBase64, "base64"),
+          contentType: "application/octet-stream",
+        },
+      ],
+    });
+    return true;
+  } catch (err) {
+    console.error("[mail] Failed to send encrypted file email:", err.message);
+    return false;
+  }
 }
 
 module.exports = { sendResetEmail, sendEncryptedFileEmail };

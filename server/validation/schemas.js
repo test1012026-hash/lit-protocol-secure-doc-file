@@ -55,8 +55,7 @@ const sendFileSchema = z.object({
   filename: z.string().trim().min(1, "Filename is required").max(255),
   encryptedPackageBase64: z
     .string()
-    .min(1, "Encrypted package is required")
-    .regex(/^[A-Za-z0-9+/=]+$/, "Encrypted package must be valid base64"),
+    .min(1, "Encrypted package is required"),
   encryptedPackageName: z
     .string()
     .trim()
