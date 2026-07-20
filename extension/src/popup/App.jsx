@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import Login from "./Login";
 import SendFile from "./SendFile";
-import Inbox from "./Inbox";
+import ReceiveFile from "./ReceiveFile";
 import ResetPassword from "./ResetPassword";
 import {
   clearAuth,
@@ -57,7 +57,7 @@ export default function App() {
   };
 
   if (!ready) {
-    return <p style={{ margin: 0, color: "#666" }}>Loading...</p>;
+    return <p className="status-text">Loading...</p>;
   }
 
   if (!auth) return <Login onLogin={handleLogin} />;
@@ -72,54 +72,42 @@ export default function App() {
   }
 
   return (
-    <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 12,
-        }}
-      >
+    <div className="panel app-shell">
+      <div className="topbar">
         <strong>{auth.email}</strong>
-        <button onClick={handleLogout}>Log out</button>
+        <button className="btn btn-secondary" style={{ width: "auto", margin: 0 }} onClick={handleLogout}>
+          Log out
+        </button>
       </div>
       {!auth.hasPassword && (
-        <div
-          style={{
-            marginBottom: 12,
-            padding: 8,
-            background: "#f5f8ff",
-            borderRadius: 4,
-            fontSize: 12,
-          }}
-        >
+        <div className="notice">
           You signed in with Google and do not have a password yet.
           <button
+            className="btn btn-primary"
+            style={{ marginTop: 8, marginBottom: 0 }}
             onClick={() => setShowSetPassword(true)}
-            style={{ display: "block", width: "100%", marginTop: 8 }}
           >
             Set password
           </button>
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div className="tabs">
         <button
+          className={`btn btn-tab ${tab === "send" ? "is-active" : ""}`}
           onClick={() => handleTabChange("send")}
           disabled={tab === "send"}
-          style={{ flex: 1 }}
         >
           Send
         </button>
         <button
-          onClick={() => handleTabChange("inbox")}
-          disabled={tab === "inbox"}
-          style={{ flex: 1 }}
+          className={`btn btn-tab ${tab === "receive" ? "is-active" : ""}`}
+          onClick={() => handleTabChange("receive")}
+          disabled={tab === "receive"}
         >
-          Inbox
+          Receive
         </button>
       </div>
-      {tab === "send" ? <SendFile auth={auth} /> : <Inbox auth={auth} />}
+      {tab === "send" ? <SendFile auth={auth} /> : <ReceiveFile auth={auth} />}
     </div>
   );
 }

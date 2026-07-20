@@ -6,6 +6,7 @@ const cors = require('cors');
 
 const authRoutes = require('./routes/auth');
 const fileRoutes = require('./routes/files');
+const { syncUserIndexes } = require('./lib/db');
 
 const app = express();
 app.use(cors());
@@ -18,7 +19,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 mongoose
   .connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
+  .then(async () => {
+    console.log('MongoDB connected');
+    try {
+      await syncUserIndexes();
+    } catch (err) {
+      console.warn('User index sync warning:', err.message);
+    }
+  })
   .catch((err) => console.error('MongoDB connection error:', err.message));
 
 app.use('/api/auth', authRoutes);

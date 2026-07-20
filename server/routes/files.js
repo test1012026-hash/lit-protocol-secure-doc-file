@@ -1,85 +1,100 @@
 const express = require("express");
 const crypto = require("crypto");
 const User = require("../models/User");
-const SharedFile = require("../models/SharedFile");
 const authMiddleware = require("../middleware/auth");
+const { validateBody } = require("../middleware/validate");
+const {
+  ensureRecipientSchema,
+  sendFileSchema,
+} = require("../validation/schemas");
+const { sendEncryptedFileEmail } = require("../lib/mail");
 
 const router = express.Router();
+const DEMO_MODE = process.env.DEMO_MODE === "true";
 
-router.post("/send", authMiddleware, async (req, res) => {
+async function ensureRecipientByEmail(email) {
+  let recipient = await User.findOne({ email });
+  if (recipient) return recipient;
+
   try {
-    const {
-      recipientEmail,
-      ciphertext,
-      dataToEncryptHash,
-      litActionCode,
-      subject,
-      message,
-      filename,
-    } = req.body;
-    if (
-      !recipientEmail ||
-      !ciphertext ||
-      !dataToEncryptHash ||
-      !litActionCode
-    ) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    const email = recipientEmail.toLowerCase();
-
-    // Find the recipient, or create an unclaimed shell record with a UUID
-    // ready for when they eventually sign up.
-    let recipient = await User.findOne({ email });
-    if (!recipient) {
-      recipient = new User({
-        email,
-        claimed: false,
-        uuid: crypto.randomUUID(),
-      });
-      await recipient.save();
-    }
-
-    const file = await SharedFile.create({
-      senderUuid: req.user.uuid,
-      senderEmail: req.user.email,
-      recipientEmail: email,
-      subject: subject?.trim() || filename?.trim() || "Untitled document",
-      message: message?.trim() || "",
-      filename: filename?.trim() || subject?.trim() || "Untitled document",
-      ciphertext,
-      dataToEncryptHash,
-      litActionCode,
-      expectedEmail: email,
-    });
-
-    res.json({
-      fileId: file._id,
-      recipientUuid: recipient.uuid,
-      recipientClaimed: recipient.claimed,
+    return await User.create({
+      email,
+      claimed: false,
+      uuid: crypto.randomUUID(),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (err.code === 11000) {
+      recipient = await User.findOne({ email });
+      if (recipient) return recipient;
+    }
+    throw err;
   }
-});
+}
 
-router.get("/inbox", authMiddleware, async (req, res) => {
-  const files = await SharedFile.find({ recipientEmail: req.user.email })
-    .select("-ciphertext")
-    .sort({ createdAt: -1 });
-  res.json(files);
-});
+router.post(
+  "/ensure-recipient",
+  authMiddleware,
+  validateBody(ensureRecipientSchema),
+  async (req, res) => {
+    try {
+      const { recipientEmail } = req.body;
+      const recipient = await ensureRecipientByEmail(recipientEmail);
+      res.json({
+        recipientUuid: recipient.uuid,
+        recipientEmail: recipient.email,
+        recipientClaimed: recipient.claimed,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
-router.get("/receive/:id", authMiddleware, async (req, res) => {
-  const file = await SharedFile.findById(req.params.id);
-  if (!file) return res.status(404).json({ error: "File not found" });
-  if (file.recipientEmail !== req.user.email) {
-    return res.status(403).json({ error: "This file was not sent to you" });
-  }
+router.post(
+  "/send",
+  authMiddleware,
+  validateBody(sendFileSchema),
+  async (req, res) => {
+    try {
+      const {
+        recipientEmail,
+        subject,
+        message,
+        filename,
+        encryptedPackageBase64,
+        encryptedPackageName,
+        recipientUuid,
+      } = req.body;
 
-  file.downloaded = true;
-  await file.save();
-  res.json(file);
-});
+      const recipient = await ensureRecipientByEmail(recipientEmail);
+
+      if (recipientUuid && recipient.uuid !== recipientUuid) {
+        return res.status(400).json({
+          error:
+            "Recipient UUID mismatch. Re-fetch recipient and encrypt again.",
+        });
+      }
+
+      const normalizedSubject = subject || filename || "Untitled document";
+      const emailSent = await sendEncryptedFileEmail({
+        to: recipientEmail,
+        senderEmail: req.user.email,
+        subject: normalizedSubject,
+        message: message || "",
+        attachmentName: encryptedPackageName,
+        attachmentBase64: encryptedPackageBase64,
+        demoMode: DEMO_MODE,
+      });
+
+      res.json({
+        recipientUuid: recipient.uuid,
+        recipientClaimed: recipient.claimed,
+        emailSent,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 module.exports = router;

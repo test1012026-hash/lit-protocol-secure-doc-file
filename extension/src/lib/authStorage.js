@@ -6,7 +6,7 @@ export function getStoredAuth() {
     chrome.storage.local.get([AUTH_KEY, TAB_KEY], (result) => {
       resolve({
         auth: result[AUTH_KEY] || null,
-        tab: result[TAB_KEY] === 'inbox' ? 'inbox' : 'send'
+        tab: result[TAB_KEY] === 'receive' ? 'receive' : 'send'
       });
     });
   });

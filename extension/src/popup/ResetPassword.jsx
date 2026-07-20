@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { parseOrThrow, passwordResetRequestSchema } from "../lib/validation";
 
 export default function ResetPassword({ initialEmail = "", onCancel }) {
   const [email, setEmail] = useState(initialEmail);
@@ -10,16 +11,15 @@ export default function ResetPassword({ initialEmail = "", onCancel }) {
   const autoSentRef = useRef(false);
 
   const sendLink = async (targetEmail) => {
-    const value = (targetEmail ?? email).trim();
     setError("");
     setStatus("");
-    if (!value) {
-      setError("Enter your email address.");
-      return;
-    }
     try {
+      const values = parseOrThrow(passwordResetRequestSchema, {
+        email: targetEmail ?? email,
+      });
       setLoading(true);
-      const { data } = await api.requestPasswordReset(value);
+      const { data } = await api.requestPasswordReset(values.email);
+      setEmail(values.email);
       setStatus(
         data.message || "A password reset link has been sent to your email.",
       );
@@ -31,33 +31,28 @@ export default function ResetPassword({ initialEmail = "", onCancel }) {
     }
   };
 
-  useEffect(() => {
-    if (!initialEmail || autoSentRef.current) return;
-    autoSentRef.current = true;
-    sendLink(initialEmail);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialEmail]);
 
   return (
-    <div>
-      <h3 style={{ marginTop: 0 }}>Set / reset password</h3>
-      <p style={{ fontSize: 12, color: "#666", marginTop: 0 }}>
-        We'll email you a secure link to set a new password.
+    <div className="auth-card app-shell">
+      <p className="brand">SecureDocShare</p>
+      <h3 className="auth-title">Set / reset password</h3>
+      <p className="hint">
+        We&apos;ll email you a secure link to set a new password.
       </p>
 
       {!sent && (
         <>
           <input
+            className="field"
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             disabled={Boolean(initialEmail)}
-            style={{ width: "100%", marginBottom: 8 }}
           />
           <button
+            className="btn btn-primary"
             onClick={() => sendLink()}
             disabled={loading}
-            style={{ width: "100%", marginBottom: 8 }}
           >
             {loading ? "Sending..." : "Send reset link"}
           </button>
@@ -66,40 +61,25 @@ export default function ResetPassword({ initialEmail = "", onCancel }) {
 
       {sent && (
         <>
-          <p style={{ fontSize: 12, margin: "0 0 8px" }}>
+          <p className="hint">
             Check <strong>{email}</strong> and open the link to choose a new
             password. The link expires in 30 minutes.
           </p>
           <button
+            className="btn btn-secondary"
             onClick={() => sendLink()}
             disabled={loading}
-            style={{
-              width: "100%",
-              marginBottom: 8,
-              background: "none",
-              border: "1px solid #ccc",
-            }}
           >
             {loading ? "Sending..." : "Resend link"}
           </button>
         </>
       )}
 
-      <button
-        onClick={onCancel}
-        style={{
-          width: "100%",
-          background: "none",
-          border: "none",
-          color: "#357",
-          cursor: "pointer",
-        }}
-      >
+      <button className="btn btn-ghost" onClick={onCancel}>
         Back to login
       </button>
 
-      {status && <p style={{ color: "#357" }}>{status}</p>}
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
+      {error && <p className="error-banner">{error}</p>}
     </div>
   );
 }
