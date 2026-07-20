@@ -25,6 +25,7 @@ function getTransporter() {
       user: SMTP_USER,
       pass: SMTP_PASS.replace(/\s+/g, ""),
     },
+    family: 4, // IPv4
     connectionTimeout: 10_000,
     greetingTimeout: 10_000,
     socketTimeout: 20_000,
