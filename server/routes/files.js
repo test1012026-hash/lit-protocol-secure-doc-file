@@ -8,12 +8,58 @@ const {
   sendFileSchema,
 } = require("../validation/schemas");
 const { sendEncryptedFileEmail } = require("../lib/mail");
+const { normalizeEmail } = require("../lib/email");
 
 const router = express.Router();
 const DEMO_MODE = process.env.DEMO_MODE === "true";
 
-async function ensureRecipientByEmail(email) {
-  let recipient = await User.findOne({ email });
+async function findUserByEmail(rawEmail) {
+  const canonical = normalizeEmail(rawEmail);
+  const raw = String(rawEmail || "")
+    .trim()
+    .toLowerCase();
+
+  let user =
+    (await User.findOne({ email: canonical, claimed: true })) ||
+    (await User.findOne({ email: canonical }));
+
+  if (!user && raw && raw !== canonical) {
+    user =
+      (await User.findOne({ email: raw, claimed: true })) ||
+      (await User.findOne({ email: raw }));
+
+    if (user) {
+      const existingCanonical = await User.findOne({ email: canonical });
+      if (
+        existingCanonical &&
+        String(existingCanonical._id) !== String(user._id)
+      ) {
+        return existingCanonical.claimed || !user.claimed
+          ? existingCanonical
+          : user;
+      }
+      user.email = canonical;
+      try {
+        await user.save();
+      } catch (err) {
+        if (err.code === 11000) {
+          return (
+            (await User.findOne({ email: canonical, claimed: true })) ||
+            (await User.findOne({ email: canonical })) ||
+            user
+          );
+        }
+        throw err;
+      }
+    }
+  }
+
+  return user;
+}
+
+async function ensureRecipientByEmail(rawEmail) {
+  const email = normalizeEmail(rawEmail);
+  let recipient = await findUserByEmail(rawEmail);
   if (recipient) return recipient;
 
   try {
@@ -24,7 +70,7 @@ async function ensureRecipientByEmail(email) {
     });
   } catch (err) {
     if (err.code === 11000) {
-      recipient = await User.findOne({ email });
+      recipient = await findUserByEmail(email);
       if (recipient) return recipient;
     }
     throw err;
@@ -56,7 +102,6 @@ router.post(
   validateBody(sendFileSchema),
   async (req, res) => {
     try {
-      console.log("req.body -->",req.body);
       const {
         recipientEmail,
         subject,
@@ -66,19 +111,15 @@ router.post(
         encryptedPackageName,
         recipientUuid,
       } = req.body;
-      console.log("recipientEmail -->",recipientEmail);
       const recipient = await ensureRecipientByEmail(recipientEmail);
-      console.log("recipient -->",recipient);
       if (recipientUuid && recipient.uuid !== recipientUuid) {
         return res.status(400).json({
           error:
             "Recipient UUID mismatch. Re-fetch recipient and encrypt again.",
         });
       }
-      console.log("subject -->",subject);
-      console.log("filename -->",filename);
       const normalizedSubject = subject || filename || "Untitled document";
-      console.log("normalizedSubject -->",normalizedSubject);
+      // Deliver to the address the sender typed (Gmail aliases still arrive).
       const emailSent = await sendEncryptedFileEmail({
         to: recipientEmail,
         senderEmail: req.user.email,
@@ -89,15 +130,13 @@ router.post(
         demoMode: DEMO_MODE,
       });
 
-      console.log("emailSent -->",emailSent);
-
       res.json({
         recipientUuid: recipient.uuid,
         recipientClaimed: recipient.claimed,
         emailSent,
       });
     } catch (err) {
-      console.log("err -->",err);
+      console.log("err -->", err);
       res.status(500).json({ error: err.message });
     }
   },

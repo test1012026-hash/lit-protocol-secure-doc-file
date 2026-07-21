@@ -186,6 +186,7 @@ export async function buildEncryptedPackage({
     version: 2,
     type: "secure-doc-share",
     mode,
+    // Delivery metadata only — decrypt is gated by recipientUuidHash, not email.
     expectedEmail,
     recipientUuidHash,
     filename: safeFileName,
@@ -206,7 +207,7 @@ export function parseEncryptedPackage(packageText) {
   if (payload?.type !== "secure-doc-share") {
     throw new Error("This file is not a SecureDocShare encrypted file.");
   }
-  if (!payload?.ciphertext || !payload?.expectedEmail) {
+  if (!payload?.ciphertext) {
     throw new Error("Encrypted file is missing required fields.");
   }
   if (!payload?.recipientUuidHash) {
@@ -218,12 +219,12 @@ export function parseEncryptedPackage(packageText) {
 }
 
 /**
- * Decrypt only if logged-in user's UUID matches the hash locked in the package.
+ * Decrypt only if the logged-in user's UUID matches the package hash.
+ * Email in the package is delivery metadata only — aliases must not block decrypt.
  */
 export async function decryptForRecipient({
   encryptedPackage,
   recipientUuid,
-  expectedEmail,
   googleIdToken,
 }) {
   if (!recipientUuid) {
@@ -235,13 +236,6 @@ export async function decryptForRecipient({
     throw new Error(
       "This file is locked to a different recipient UUID. You cannot decrypt it.",
     );
-  }
-
-  if (
-    encryptedPackage.expectedEmail.toLowerCase() !==
-    expectedEmail.toLowerCase()
-  ) {
-    throw new Error("This encrypted file was sent to a different email address.");
   }
 
   // Demo / UUID layer
@@ -256,16 +250,15 @@ export async function decryptForRecipient({
     );
   }
 
-  // Lit mode: Google gate + Lit decrypt, then UUID-AES decrypt
+  // Lit mode: require a valid Google session, then Lit decrypt + UUID-AES.
+  // Do not compare emails — UUID is the recipient lock (alias-safe).
   const code = `
-    async function main({ pkpId, ciphertext, googleIdToken, expectedEmail, googleClientId }) {
+    async function main({ pkpId, ciphertext, googleIdToken, googleClientId }) {
       try {
         const res = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + googleIdToken);
         const payload = await res.json();
 
-        const authorized = !!payload.email &&
-          payload.email.toLowerCase() === expectedEmail.toLowerCase() &&
-          payload.aud === googleClientId;
+        const authorized = !!payload.email && payload.aud === googleClientId;
 
         if (!authorized) {
           return { authorized: false };
@@ -283,7 +276,6 @@ export async function decryptForRecipient({
     pkpId: LIT_PKP_ID,
     ciphertext: encryptedPackage.ciphertext,
     googleIdToken,
-    expectedEmail: encryptedPackage.expectedEmail,
     googleClientId: GOOGLE_CLIENT_ID,
   });
 

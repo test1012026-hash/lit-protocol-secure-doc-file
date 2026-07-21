@@ -6,6 +6,7 @@ const { OAuth2Client } = require("google-auth-library");
 const User = require("../models/User");
 const PasswordReset = require("../models/PasswordReset");
 const { sendResetEmail } = require("../lib/mail");
+const { normalizeEmail } = require("../lib/email");
 const { validateBody, validateQuery } = require("../middleware/validate");
 const {
   signupSchema,
@@ -54,7 +55,8 @@ function hashResetToken(token) {
 
 router.post("/signup", validateBody(signupSchema), async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { password } = req.body;
 
     let user = await User.findOne({ email });
     if (user?.claimed)
@@ -83,7 +85,8 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
 
 router.post("/login", validateBody(loginSchema), async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { password } = req.body;
     const user = await User.findOne({
       email,
       claimed: true,
@@ -112,9 +115,18 @@ router.post(
         audience: process.env.GOOGLE_CLIENT_ID,
       });
       const payload = ticket.getPayload();
-      const email = payload.email.toLowerCase();
+      const email = normalizeEmail(payload.email);
 
       let user = await User.findOne({ email });
+      if (!user) {
+        const raw = String(payload.email || "")
+          .trim()
+          .toLowerCase();
+        if (raw && raw !== email) {
+          user = await User.findOne({ email: raw });
+          if (user) user.email = email;
+        }
+      }
       if (!user) {
         user = new User({ email, googleId: payload.sub, claimed: true });
       } else {
@@ -137,7 +149,7 @@ router.post(
   validateBody(passwordResetRequestSchema),
   async (req, res) => {
     try {
-      const { email } = req.body;
+      const email = normalizeEmail(req.body.email);
 
       const user = await User.findOne({ email, claimed: true });
       if (!user)
@@ -172,7 +184,8 @@ router.get(
   validateQuery(passwordResetVerifySchema),
   async (req, res) => {
     try {
-      const { email, token } = req.query;
+      const email = normalizeEmail(req.query.email);
+      const { token } = req.query;
       const record = await PasswordReset.findOne({ email });
 
       if (!record || record.tokenHash !== hashResetToken(token)) {
@@ -211,7 +224,8 @@ router.post(
   validateBody(passwordResetCompleteSchema),
   async (req, res) => {
     try {
-      const { email, token, password } = req.body;
+      const email = normalizeEmail(req.body.email);
+      const { token, password } = req.body;
 
       const record = await PasswordReset.findOne({ email });
       if (!record || record.tokenHash !== hashResetToken(token)) {

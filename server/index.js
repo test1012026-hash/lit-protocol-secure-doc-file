@@ -1,38 +1,5 @@
-require('dotenv').config();
-const path = require('path');
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-
-const authRoutes = require('./routes/auth');
-const fileRoutes = require('./routes/files');
-const { syncUserIndexes } = require('./lib/db');
-
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '25mb' }));
-
-app.get('/reset-password', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'reset-password.html'));
-});
-app.use(express.static(path.join(__dirname, 'public')));
-
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(async () => {
-    console.log('MongoDB connected');
-    try {
-      await syncUserIndexes();
-    } catch (err) {
-      console.warn('User index sync warning:', err.message);
-    }
-  })
-  .catch((err) => console.error('MongoDB connection error:', err.message));
-
-app.use('/api/auth', authRoutes);
-app.use('/api/files', fileRoutes);
-
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+require("dotenv").config();
+const app = require("./app");
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

@@ -24,15 +24,6 @@ export default function ReceiveFile({ auth }) {
       const packageText = await values.encryptedFile.text();
       const encryptedPackage = parseEncryptedPackage(packageText);
 
-      if (
-        encryptedPackage.expectedEmail.toLowerCase() !==
-        auth.email.toLowerCase()
-      ) {
-        throw new Error(
-          "This encrypted file was sent to a different email address.",
-        );
-      }
-
       let googleIdToken = auth.googleIdToken || null;
       if (!DEMO_MODE && encryptedPackage.mode === "lit") {
         setStatus("Verifying identity with Google...");
@@ -43,7 +34,6 @@ export default function ReceiveFile({ auth }) {
       const decrypted = await decryptForRecipient({
         encryptedPackage,
         recipientUuid: auth.uuid,
-        expectedEmail: auth.email,
         googleIdToken,
       });
 
@@ -79,8 +69,9 @@ export default function ReceiveFile({ auth }) {
         account UUID — without the matching UUID the PDF cannot be opened.
       </p>
       <p className="hint">
-        Do not open the emailed file directly. Decrypt it here after logging in
-        with the recipient Google/email account.
+        Do not open the emailed file directly. Decrypt here after logging into
+        the recipient account — access is locked to that account&apos;s UUID,
+        not the email string (aliases are fine).
       </p>
       <input
         className="field"

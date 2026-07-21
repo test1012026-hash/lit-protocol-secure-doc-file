@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { DEMO_MODE } from "../lib/config";
 import { parseOrThrow, sendFileFormSchema } from "../lib/validation";
 import { getStoredAuth } from "../lib/authStorage";
+import { normalizeEmail } from "../lib/email";
 
 export default function SendFile({ auth }) {
   const [recipientEmail, setRecipientEmail] = useState("");
@@ -23,7 +24,7 @@ export default function SendFile({ auth }) {
 
   const handleSend = async () => {
     try {
-      if (storedAuth.email === recipientEmail) {
+      if (normalizeEmail(storedAuth.email) === normalizeEmail(recipientEmail)) {
         setStatus("Error: You cannot send a file to yourself");
         return;
       }
