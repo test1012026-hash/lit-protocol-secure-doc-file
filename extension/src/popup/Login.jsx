@@ -99,7 +99,7 @@ export default function Login({ onLogin }) {
       </button>
       <button
         className="btn btn-secondary"
-        onClick={withGoogle}
+        onClick={() => withGoogle()}
         disabled={loading || googleLoading}
       >
         {googleLoading ? "Connecting Google..." : "Continue with Google"}

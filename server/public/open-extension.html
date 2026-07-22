@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open SecureDocShare</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background:
+        radial-gradient(120% 80% at 10% 0%, rgba(43, 179, 160, 0.22), transparent 55%),
+        radial-gradient(100% 70% at 100% 100%, rgba(56, 120, 160, 0.2), transparent 50%),
+        linear-gradient(160deg, #0f1c24, #17303b 55%, #1f3d4a);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: #1c2330;
+    }
+    .card {
+      background: #fff;
+      width: 100%;
+      max-width: 420px;
+      margin: 16px;
+      padding: 28px 26px;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(30, 50, 90, 0.12);
+      text-align: center;
+    }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p { margin: 0 0 16px; font-size: 14px; color: #667085; line-height: 1.45; }
+    a.btn, button {
+      display: block;
+      width: 100%;
+      padding: 11px;
+      font-weight: 600;
+      font-size: 14px;
+      text-decoration: none;
+      color: #04241f;
+      background: linear-gradient(180deg, #3cc9b5, #2bb3a0);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      box-shadow: 0 8px 18px rgba(43, 179, 160, 0.28);
+    }
+    button.secondary {
+      margin-top: 10px;
+      background: #fff;
+      color: #344054;
+      border: 1px solid #d0d5dd;
+      box-shadow: none;
+    }
+    .msg { margin-top: 16px; font-size: 13px; line-height: 1.45; text-align: left; }
+    .error { color: #d92d20; }
+    .hint {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #f2f4f7;
+      color: #475467;
+      font-size: 12px;
+      line-height: 1.45;
+      text-align: left;
+      word-break: break-all;
+    }
+    code { font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>SecureDocShare</h1>
+    <p id="status">Opening the extension…</p>
+    <a id="openLink" class="btn" hidden href="#">Open SecureDocShare</a>
+    <button id="copyBtn" class="secondary" type="button" hidden>Copy extension URL</button>
+    <p id="msg" class="msg" hidden></p>
+    <div id="hint" class="hint" hidden></div>
+  </div>
+  <script>
+    const EXTENSION_ID = "__EXTENSION_ID__";
+    const extensionUrl = EXTENSION_ID && !EXTENSION_ID.startsWith("__")
+      ? `chrome-extension://${EXTENSION_ID}/index.html`
+      : "";
+
+    const statusEl = document.getElementById("status");
+    const openLink = document.getElementById("openLink");
+    const copyBtn = document.getElementById("copyBtn");
+    const msg = document.getElementById("msg");
+    const hint = document.getElementById("hint");
+
+    function showManual(errorText) {
+      statusEl.textContent = "Open SecureDocShare in Chrome";
+      msg.hidden = false;
+      msg.className = "msg error";
+      msg.textContent = errorText;
+
+      if (extensionUrl) {
+        openLink.hidden = false;
+        openLink.href = extensionUrl;
+        copyBtn.hidden = false;
+        hint.hidden = false;
+        hint.innerHTML =
+          "Open this page in <b>Google Chrome</b> with SecureDocShare loaded from <code>extension/dist</code>, " +
+          "or paste this into Chrome’s address bar:<br><code>" + extensionUrl + "</code>";
+      }
+    }
+
+    function canMessageExtension() {
+      return !!(window.chrome && chrome.runtime && typeof chrome.runtime.sendMessage === "function");
+    }
+
+    function launchViaExternalMessage() {
+      return new Promise((resolve) => {
+        if (!extensionUrl) {
+          resolve({ ok: false, error: "EXTENSION_ID is not configured on the server." });
+          return;
+        }
+        if (!canMessageExtension()) {
+          resolve({
+            ok: false,
+            error: "Extension API not available. Use Google Chrome with SecureDocShare installed.",
+          });
+          return;
+        }
+
+        chrome.runtime.sendMessage(
+          EXTENSION_ID,
+          { action: "LAUNCH" },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              resolve({
+                ok: false,
+                error: chrome.runtime.lastError.message || "Could not reach the extension.",
+              });
+              return;
+            }
+            resolve(response?.ok ? { ok: true } : { ok: false, error: response?.error || "Extension did not open." });
+          },
+        );
+      });
+    }
+
+    async function launch() {
+      await new Promise((r) => setTimeout(r, 600));
+      if (location.protocol === "chrome-extension:") return;
+
+      const result = await launchViaExternalMessage();
+      if (result.ok) {
+        statusEl.textContent = "Opening SecureDocShare…";
+        return;
+      }
+      showManual(result.error);
+    }
+
+    copyBtn.addEventListener("click", async () => {
+      if (!extensionUrl) return;
+      try {
+        await navigator.clipboard.writeText(extensionUrl);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy extension URL"; }, 1500);
+      } catch {
+        copyBtn.textContent = "Copy failed";
+      }
+    });
+
+    launch();
+  </script>
+</body>
+</html>

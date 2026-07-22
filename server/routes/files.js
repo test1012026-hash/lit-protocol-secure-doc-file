@@ -110,6 +110,7 @@ router.post(
         encryptedPackageBase64,
         encryptedPackageName,
         recipientUuid,
+        gmailAccessToken,
       } = req.body;
       const recipient = await ensureRecipientByEmail(recipientEmail);
       if (recipientUuid && recipient.uuid !== recipientUuid) {
@@ -118,22 +119,54 @@ router.post(
             "Recipient UUID mismatch. Re-fetch recipient and encrypt again.",
         });
       }
+      const sender = await User.findOne({ uuid: req.user.uuid, claimed: true });
+      if (!sender) {
+        return res.status(401).json({ error: "Sender account not found" });
+      }
+      if (!sender.gmailRefreshToken && !gmailAccessToken) {
+        return res.status(403).json({
+          error: "Allow Gmail access once to send from your address.",
+          code: "GMAIL_NOT_CONNECTED",
+        });
+      }
+
       const normalizedSubject = subject || filename || "Untitled document";
-      // Deliver to the address the sender typed (Gmail aliases still arrive).
-      const emailSent = await sendEncryptedFileEmail({
-        to: recipientEmail,
-        senderEmail: req.user.email,
-        subject: normalizedSubject,
-        message: message || "",
-        attachmentName: encryptedPackageName,
-        attachmentBase64: encryptedPackageBase64,
-        demoMode: DEMO_MODE,
-      });
+      let emailSent = false;
+      try {
+        emailSent = await sendEncryptedFileEmail({
+          to: recipientEmail,
+          senderEmail: sender.email,
+          subject: normalizedSubject,
+          message: message || "",
+          attachmentName: encryptedPackageName,
+          attachmentBase64: encryptedPackageBase64,
+          demoMode: DEMO_MODE,
+          gmailAccessToken,
+          senderRefreshToken: sender.gmailRefreshToken,
+        });
+      } catch (mailErr) {
+        const msg = mailErr.message || "Gmail send failed";
+        if (/invalid_grant|token has been expired|revoked/i.test(msg)) {
+          await User.updateOne(
+            { uuid: req.user.uuid },
+            { $unset: { gmailRefreshToken: 1 } },
+          );
+          return res.status(403).json({
+            error: "Gmail access expired. Allow Gmail again to continue sending.",
+            code: "GMAIL_NOT_CONNECTED",
+          });
+        }
+        return res.status(502).json({
+          error: msg,
+          code: "GMAIL_SEND_FAILED",
+        });
+      }
 
       res.json({
         recipientUuid: recipient.uuid,
         recipientClaimed: recipient.claimed,
         emailSent,
+        from: sender.email,
       });
     } catch (err) {
       console.log("err -->", err);

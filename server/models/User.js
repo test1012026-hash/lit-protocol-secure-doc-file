@@ -17,6 +17,9 @@ const userSchema = new mongoose.Schema({
   },
   passwordHash: { type: String, default: null },
   googleId: { type: String, default: null },
+  gmailRefreshToken: { type: String, default: null },
+  gmailConnectState: { type: String, default: null },
+  gmailConnectStateExpires: { type: Date, default: null },
   claimed: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
 });

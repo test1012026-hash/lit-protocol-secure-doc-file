@@ -6,7 +6,10 @@ function env(key, fallback) {
 }
 
 export const API_BASE_URL = env("VITE_API_BASE_URL", "http://localhost:4000/api");
+// Chrome extension OAuth client — login id_token via launchWebAuthFlow
 export const GOOGLE_CLIENT_ID = env("VITE_GOOGLE_CLIENT_ID");
+// Web OAuth client — Gmail send via launchWebAuthFlow + server code exchange
+export const GOOGLE_GMAIL_CLIENT_ID = env("VITE_GOOGLE_GMAIL_CLIENT_ID");
 export const EXTENSION_ID = env("VITE_EXTENSION_ID");
 export const GOOGLE_REDIRECT_URI = `https://${EXTENSION_ID}.chromiumapp.org`;
 export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";

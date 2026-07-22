@@ -5,6 +5,7 @@ import { DEMO_MODE } from "../lib/config";
 import { parseOrThrow, sendFileFormSchema } from "../lib/validation";
 import { getStoredAuth } from "../lib/authStorage";
 import { normalizeEmail } from "../lib/email";
+import { ensureGmailConnected } from "../lib/googleAuth";
 
 export default function SendFile({ auth }) {
   const [recipientEmail, setRecipientEmail] = useState("");
@@ -17,14 +18,14 @@ export default function SendFile({ auth }) {
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    getStoredAuth().then(({ auth: storedAuth, tab: storedTab }) => {
-      if (storedAuth) setStoredAuth(storedAuth);
+    getStoredAuth().then(({ auth: stored }) => {
+      if (stored) setStoredAuth(stored);
     });
   }, []);
 
   const handleSend = async () => {
     try {
-      if (normalizeEmail(storedAuth.email) === normalizeEmail(recipientEmail)) {
+      if (normalizeEmail(storedAuth?.email) === normalizeEmail(recipientEmail)) {
         setStatus("Error: You cannot send a file to yourself");
         return;
       }
@@ -37,6 +38,11 @@ export default function SendFile({ auth }) {
       });
 
       setLoading(true);
+      if (!auth.gmailConnected) {
+        setStatus("Allow Gmail access once...");
+      }
+      await ensureGmailConnected(auth.token, auth);
+
       setStatus("Creating recipient UUID...");
       const { data: recipient } = await api.ensureRecipient(
         values.recipientEmail,
@@ -63,7 +69,7 @@ export default function SendFile({ auth }) {
         mode: encrypted.mode,
       });
 
-      setStatus("Sending encrypted PDF...");
+      setStatus("Sending via your Gmail...");
       const { data } = await api.sendFile(
         {
           recipientEmail: values.recipientEmail,
@@ -79,17 +85,27 @@ export default function SendFile({ auth }) {
 
       setStatus(
         data.emailSent
-          ? `Sent. Encrypted PDF emailed to ${values.recipientEmail} (locked to their UUID).`
-          : "Email could not be sent because SMTP is not configured on the server.",
+          ? `Sent from ${data.from || auth.email} to ${values.recipientEmail}.`
+          : "Email could not be sent.",
       );
       setRecipientEmail("");
       setSubject("");
       setMessage("");
       setFile(null);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
+      const code = err.response?.data?.code;
+      if (code === "GMAIL_NOT_CONNECTED") {
+        try {
+          setStatus("Gmail access expired. Reconnecting...");
+          await ensureGmailConnected(auth.token, { ...auth, gmailConnected: false });
+          setStatus("Gmail reconnected. Click send again.");
+          return;
+        } catch (retryErr) {
+          setStatus("Error: " + (retryErr.response?.data?.error || retryErr.message));
+          return;
+        }
+      }
       setStatus("Error: " + (err.response?.data?.error || err.message));
     } finally {
       setLoading(false);
@@ -100,10 +116,13 @@ export default function SendFile({ auth }) {
     <div>
       {DEMO_MODE && (
         <p className="notice notice-warn">
-          Demo mode: PDF is AES-encrypted with the recipient UUID. Without that
-          UUID, the file cannot be decrypted.
+          Demo mode: PDF is AES-encrypted with the recipient UUID.
         </p>
       )}
+      <p className="hint">
+        Mail sends from your Google account ({auth.email}). Gmail permission is
+        asked once, then remembered.
+      </p>
       <input
         className="field"
         placeholder="Recipient email"
@@ -131,21 +150,11 @@ export default function SendFile({ auth }) {
         accept="application/pdf,.pdf"
         onChange={(e) => setFile(e.target.files[0] || null)}
       />
-      <button
-        className="btn btn-primary"
-        onClick={handleSend}
-        disabled={loading}
-      >
+      <button className="btn btn-primary" onClick={handleSend} disabled={loading}>
         {loading ? "Working..." : "Encrypt and send"}
       </button>
       {status && (
-        <p
-          className={
-            status.startsWith("Error")
-              ? "error-banner"
-              : "status-text status-ok"
-          }
-        >
+        <p className={status.startsWith("Error") ? "error-banner" : "status-text status-ok"}>
           {status}
         </p>
       )}

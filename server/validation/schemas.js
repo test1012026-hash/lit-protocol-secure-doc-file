@@ -65,6 +65,12 @@ const sendFileSchema = z.object({
       (name) => name.toLowerCase().endsWith(".securepdf"),
       "Encrypted package must be a .securepdf file",
     ),
+  gmailAccessToken: z.string().min(20).optional(),
+});
+
+const gmailAccessTokenSchema = z.object({
+  code: z.string().min(10, "Authorization code is required"),
+  redirectUri: z.string().url("redirectUri must be a valid URL"),
 });
 
 module.exports = {
@@ -76,4 +82,5 @@ module.exports = {
   passwordResetVerifySchema,
   ensureRecipientSchema,
   sendFileSchema,
+  gmailAccessTokenSchema,
 };

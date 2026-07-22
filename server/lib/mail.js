@@ -1,28 +1,6 @@
 require("dotenv").config();
 const { google } = require("googleapis");
 
-// ===============================
-// Google OAuth2 Configuration
-// ===============================
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_GMAIL_CLIENT_ID || process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_GMAIL_CLIENT_SECRET,
-  process.env.GOOGLE_GMAIL_REDIRECT_URI ||
-    "http://localhost:4000/auth/google/callback",
-);
-
-oauth2Client.setCredentials({
-  refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
-});
-
-const gmail = google.gmail({
-  version: "v1",
-  auth: oauth2Client,
-});
-
-// ===============================
-// Create MIME Email
-// ===============================
 function createMimeMessage({
   from,
   to,
@@ -65,7 +43,7 @@ function createMimeMessage({
       "Content-Transfer-Encoding: base64",
       `Content-Disposition: attachment; filename="${attachmentName}"`,
       "",
-      attachmentBase64
+      attachmentBase64,
     );
   }
 
@@ -78,19 +56,41 @@ function createMimeMessage({
     .replace(/=+$/, "");
 }
 
-// ===============================
-// Generic Send Email
-// ===============================
 async function sendEmail({
   to,
+  from,
   subject,
   text,
   html,
   attachmentName,
   attachmentBase64,
+  accessToken,
+  refreshToken,
 }) {
+  const oauth2 = new google.auth.OAuth2();
+  if (accessToken) {
+    oauth2.setCredentials({ access_token: accessToken });
+  } else if (refreshToken) {
+    const { gmailClientForRefreshToken } = require("./gmailAuth");
+    const gmail = gmailClientForRefreshToken(refreshToken);
+    const raw = createMimeMessage({
+      from,
+      to,
+      subject,
+      text,
+      html,
+      attachmentName,
+      attachmentBase64,
+    });
+    await gmail.users.messages.send({ userId: "me", requestBody: { raw } });
+    return;
+  } else {
+    throw new Error("Gmail access token is required");
+  }
+
+  const gmail = google.gmail({ version: "v1", auth: oauth2 });
   const raw = createMimeMessage({
-    from: process.env.GMAIL_SENDER,
+    from,
     to,
     subject,
     text,
@@ -98,74 +98,29 @@ async function sendEmail({
     attachmentName,
     attachmentBase64,
   });
-
-  await gmail.users.messages.send({
-    userId: "me",
-    requestBody: {
-      raw,
-    },
-  });
+  await gmail.users.messages.send({ userId: "me", requestBody: { raw } });
 }
 
-// ===============================
-// Reset Password Email
-// ===============================
 async function sendResetEmail(email, resetLink) {
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  const from = process.env.GMAIL_SENDER;
+  if (!refreshToken || !from) {
+    console.log("Password reset link (Gmail not configured):", resetLink);
+    return;
+  }
+
   const subject = "Set your SecureDocShare password";
-
-  const text = `
-Click the link below to set a new password.
-
-${resetLink}
-
-This link expires in 30 minutes.
-`;
-
-  const html = `
-<h2>SecureDocShare</h2>
-
-<p>Click below to set your password.</p>
-
-<p>
-<a href="${resetLink}"
-style="
-padding:12px 20px;
-background:#3366cc;
-color:white;
-text-decoration:none;
-border-radius:4px;">
-Set Password
-</a>
-</p>
-
-<p>
-Or open:
-<br>
-${resetLink}
-</p>
-
-<p style="color:#777">
-This link expires in 30 minutes.
-</p>
-`;
+  const text = `Click the link below to set a new password.\n\n${resetLink}\n\nThis link expires in 30 minutes.`;
+  const html = `<h2>SecureDocShare</h2><p><a href="${resetLink}">Set Password</a></p>`;
 
   try {
-    await sendEmail({
-      to: email,
-      subject,
-      text,
-      html,
-    });
-
-    console.log("Reset email sent.");
+    await sendEmail({ to: email, from, subject, text, html, refreshToken });
   } catch (err) {
-    console.error(err);
+    console.error("Failed to send reset email:", err.message);
+    console.log("Password reset link:", resetLink);
   }
 }
 
-// ===============================
-// Encrypted File Email
-// ===============================
 async function sendEncryptedFileEmail({
   to,
   senderEmail,
@@ -174,72 +129,64 @@ async function sendEncryptedFileEmail({
   attachmentName,
   attachmentBase64,
   demoMode,
+  gmailAccessToken,
+  senderRefreshToken,
 }) {
-  const text = `
-${senderEmail} sent you a secure file.
+  if (!gmailAccessToken && !senderRefreshToken) {
+    throw new Error("Gmail access token is required to send as your address.");
+  }
 
-${message || ""}
+  const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+  const openUrl = appUrl ? `${appUrl}/open-extension` : null;
 
-Steps:
+  const text = [
+    `${senderEmail} sent you a secure file.`,
+    "",
+    message || "",
+    "",
+    "Open SecureDocShare → Receive → upload the attachment.",
+    openUrl ? `\nOpen extension: ${openUrl}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-1. Open SecureDocShare Extension
-
-2. Login
-
-3. Go to Receive
-
-4. Upload attached file
-
-${
-  demoMode
-    ? "Demo mode enabled."
-    : "Only this email can decrypt the file."
-}
-`;
+  const openButton = openUrl
+    ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`
+    : "<p>Click the SecureDocShare icon in Chrome to open the extension.</p>";
 
   const html = `
 <h2>${senderEmail} sent you a secure file</h2>
-
-${
-  message
-    ? `<p><b>Message:</b><br>${message}</p>`
-    : ""
-}
-
+${message ? `<p><b>Message:</b><br>${message}</p>` : ""}
 <p>The encrypted file is attached.</p>
-
 <ol>
-<li>Open SecureDocShare Extension</li>
+<li>Open SecureDocShare</li>
 <li>Login with Google</li>
 <li>Go to Receive</li>
-<li>Upload attached file</li>
+<li>Upload the attached file</li>
 </ol>
-
+${openButton}
 <p style="color:gray">
-${
-  demoMode
-    ? "Demo mode enabled."
-    : "Only this email can decrypt this file."
-}
+  Log in with the same Google account this email was sent to, then upload the attached <code>.securepdf</code> on the Receive tab.
 </p>
+<p style="color:gray">${
+    demoMode ? "Demo mode enabled." : "Only this email can decrypt this file."
+  }</p>
 `;
 
-  try {
-    await sendEmail({
-      to,
-      subject,
-      text,
-      html,
-      attachmentName,
-      attachmentBase64,
-    });
+  await sendEmail({
+    to,
+    from: senderEmail,
+    subject,
+    text,
+    html,
+    attachmentName,
+    attachmentBase64,
+    accessToken: senderRefreshToken ? undefined : gmailAccessToken,
+    refreshToken: senderRefreshToken,
+  });
 
-    console.log("Encrypted email sent.");
-    return true;
-  } catch (err) {
-    console.error("Failed to send email:", err);
-    return false;
-  }
+  console.log("Encrypted email sent from", senderEmail);
+  return true;
 }
 
 module.exports = {

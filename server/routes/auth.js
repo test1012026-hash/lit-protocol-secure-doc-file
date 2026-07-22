@@ -7,6 +7,16 @@ const User = require("../models/User");
 const PasswordReset = require("../models/PasswordReset");
 const { sendResetEmail } = require("../lib/mail");
 const { normalizeEmail } = require("../lib/email");
+const {
+  getGmailAuthUrl,
+  exchangeCodeForTokens,
+  getOAuthClient,
+  createConnectState,
+  consumeConnectState,
+  getGoogleOAuthAudience,
+  verifyGoogleIdToken,
+} = require("../lib/gmailAuth");
+const authMiddleware = require("../middleware/auth");
 const { validateBody, validateQuery } = require("../middleware/validate");
 const {
   signupSchema,
@@ -15,6 +25,7 @@ const {
   passwordResetRequestSchema,
   passwordResetCompleteSchema,
   passwordResetVerifySchema,
+  gmailAccessTokenSchema,
 } = require("../validation/schemas");
 
 const router = express.Router();
@@ -42,6 +53,7 @@ function userPayload(user) {
     uuid: user.uuid,
     email: user.email,
     hasPassword: Boolean(user.passwordHash),
+    gmailConnected: Boolean(user.gmailRefreshToken),
   };
 }
 
@@ -103,6 +115,32 @@ router.post("/login", validateBody(loginSchema), async (req, res) => {
   }
 });
 
+async function upsertGoogleUser(payload, gmailRefreshToken) {
+  const email = normalizeEmail(payload.email);
+
+  let user = await User.findOne({ email });
+  if (!user) {
+    const raw = String(payload.email || "")
+      .trim()
+      .toLowerCase();
+    if (raw && raw !== email) {
+      user = await User.findOne({ email: raw });
+      if (user) user.email = email;
+    }
+  }
+  if (!user) {
+    user = new User({ email, googleId: payload.sub, claimed: true });
+  } else {
+    user.googleId = payload.sub;
+    user.claimed = true;
+  }
+  if (gmailRefreshToken) {
+    user.gmailRefreshToken = gmailRefreshToken;
+  }
+  await user.save();
+  return user;
+}
+
 router.post(
   "/login/google",
   validateBody(googleLoginSchema),
@@ -115,31 +153,15 @@ router.post(
         audience: process.env.GOOGLE_CLIENT_ID,
       });
       const payload = ticket.getPayload();
-      const email = normalizeEmail(payload.email);
+      const user = await upsertGoogleUser(payload);
 
-      let user = await User.findOne({ email });
-      if (!user) {
-        const raw = String(payload.email || "")
-          .trim()
-          .toLowerCase();
-        if (raw && raw !== email) {
-          user = await User.findOne({ email: raw });
-          if (user) user.email = email;
-        }
-      }
-      if (!user) {
-        user = new User({ email, googleId: payload.sub, claimed: true });
-      } else {
-        user.googleId = payload.sub;
-        user.claimed = true;
-      }
-      await user.save();
-
-      res.json(userPayload(user));
+      res.json({
+        ...userPayload(user),
+        googleIdToken: idToken,
+      });
     } catch (err) {
-      res
-        .status(401)
-        .json({ error: "Google verification failed: " + err.message });
+      const msg = err.message || String(err);
+      res.status(401).json({ error: "Google verification failed: " + msg });
     }
   },
 );
@@ -257,5 +279,162 @@ router.post(
     }
   },
 );
+
+router.post("/google/refresh", authMiddleware, async (req, res) => {
+  try {
+    const { code, redirectUri } = req.body;
+    if (!code) {
+      return res.status(400).json({ error: "Google authorization code is required" });
+    }
+
+    const tokens = await exchangeCodeForTokens(code, redirectUri);
+    if (!tokens.id_token) {
+      return res.status(401).json({ error: "Google did not return an id_token" });
+    }
+
+    const payload = await verifyGoogleIdToken(tokens.id_token);
+    const user = await User.findOne({ uuid: req.user.uuid });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (normalizeEmail(payload.email) !== normalizeEmail(user.email)) {
+      return res.status(403).json({
+        error: "Google account does not match your logged-in email.",
+      });
+    }
+
+    if (tokens.refresh_token) {
+      user.gmailRefreshToken = tokens.refresh_token;
+      await user.save();
+    }
+
+    res.json({
+      googleIdToken: tokens.id_token,
+      gmailConnected: Boolean(user.gmailRefreshToken),
+    });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+router.post(
+  "/gmail/access-token",
+  authMiddleware,
+  validateBody(gmailAccessTokenSchema),
+  async (req, res) => {
+    try {
+      const { code, redirectUri } = req.body;
+      const tokens = await exchangeCodeForTokens(code, redirectUri);
+      if (!tokens.access_token) {
+        return res
+          .status(401)
+          .json({ error: "Google did not return an access token" });
+      }
+
+      const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (tokens.refresh_token) {
+        user.gmailRefreshToken = tokens.refresh_token;
+        await user.save();
+      } else if (!user.gmailRefreshToken) {
+        return res.status(401).json({
+          error:
+            "Gmail permission was not saved. Approve all requested access and try again.",
+          code: "GMAIL_CONSENT_REQUIRED",
+        });
+      }
+
+      res.json({
+        accessToken: tokens.access_token,
+        gmailConnected: Boolean(user.gmailRefreshToken),
+      });
+    } catch (err) {
+      const msg = err.message || String(err);
+      res.status(401).json({ error: msg });
+    }
+  },
+);
+
+router.get("/gmail/status", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ gmailConnected: Boolean(user.gmailRefreshToken) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/gmail/connect", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const state = await createConnectState(user.uuid);
+    const { url, redirectUri, clientId } = getGmailAuthUrl(state);
+    res.json({ url, redirectUri, clientId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/gmail/callback", async (req, res) => {
+  const fail = (message) =>
+    res.status(400).send(
+      `<html><body style="font-family:system-ui;padding:24px"><h2>Gmail connect failed</h2><p>${message}</p></body></html>`,
+    );
+
+  try {
+    const { code, state, error, error_description: errorDescription } =
+      req.query;
+    if (error) {
+      return fail(`${error}${errorDescription ? `: ${errorDescription}` : ""}`);
+    }
+    if (!code || !state) return fail("Missing code or state.");
+
+    const uuid = await consumeConnectState(String(state));
+    if (!uuid) {
+      return fail("Connect link expired. Try Connect Gmail again.");
+    }
+
+    const tokens = await exchangeCodeForTokens(String(code));
+    if (!tokens.refresh_token) {
+      return fail(
+        "No refresh token returned. Revoke app access at myaccount.google.com/permissions and try again.",
+      );
+    }
+
+    const oauth2Client = getOAuthClient();
+    oauth2Client.setCredentials(tokens);
+    const { google } = require("googleapis");
+    const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
+    const googleEmail = (await oauth2.userinfo.get()).data.email;
+
+    const user = await User.findOne({ uuid });
+    if (!user) return fail("User not found.");
+
+    if (
+      googleEmail &&
+      normalizeEmail(googleEmail) !== normalizeEmail(user.email)
+    ) {
+      return fail(
+        `Google account (${googleEmail}) must match your login (${user.email}).`,
+      );
+    }
+
+    user.gmailRefreshToken = tokens.refresh_token;
+    if (googleEmail) user.email = normalizeEmail(googleEmail);
+    await user.save();
+
+    res.send(
+      `<html><body style="font-family:system-ui;padding:24px"><h2>Gmail connected</h2><p>Sends will appear From: <b>${user.email}</b></p></body></html>`,
+    );
+  } catch (err) {
+    console.error("Gmail callback error:", err);
+    fail(err.message || "Unexpected error");
+  }
+});
 
 module.exports = router;
