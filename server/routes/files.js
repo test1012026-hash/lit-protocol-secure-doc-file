@@ -6,6 +6,7 @@ const { validateBody } = require("../middleware/validate");
 const {
   ensureRecipientSchema,
   sendFileSchema,
+  provisionRecipientKeysSchema,
 } = require("../validation/schemas");
 const { sendEncryptedFileEmail } = require("../lib/mail");
 const { normalizeEmail } = require("../lib/email");
@@ -77,6 +78,15 @@ async function ensureRecipientByEmail(rawEmail) {
   }
 }
 
+function hasCompleteRecipientKeys(user) {
+  return Boolean(
+    user?.publicKeySpki &&
+      user?.privateKeyEnc &&
+      user?.privateKeyIv &&
+      user?.privateKeySalt,
+  );
+}
+
 router.post(
   "/ensure-recipient",
   authMiddleware,
@@ -89,6 +99,62 @@ router.post(
         recipientUuid: recipient.uuid,
         recipientEmail: recipient.email,
         recipientClaimed: recipient.claimed,
+        publicKeySpki: recipient.publicKeySpki || null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+/** Store RSA keys for a new recipient so mail can be sent before they log in. */
+router.post(
+  "/provision-recipient-keys",
+  authMiddleware,
+  validateBody(provisionRecipientKeysSchema),
+  async (req, res) => {
+    try {
+      const {
+        recipientEmail,
+        recipientUuid,
+        publicKeySpki,
+        privateKeyEnc,
+        privateKeyIv,
+        privateKeySalt,
+      } = req.body;
+
+      const recipient = await ensureRecipientByEmail(recipientEmail);
+      if (recipient.uuid !== recipientUuid) {
+        return res.status(400).json({
+          error:
+            "Recipient UUID mismatch. Re-fetch recipient and provision again.",
+        });
+      }
+
+      if (hasCompleteRecipientKeys(recipient)) {
+        return res.json({
+          ok: true,
+          alreadyProvisioned: true,
+          publicKeySpki: recipient.publicKeySpki,
+          recipientUuid: recipient.uuid,
+        });
+      }
+
+      recipient.publicKeySpki = String(publicKeySpki).trim();
+      recipient.privateKeyEnc = String(privateKeyEnc).trim();
+      recipient.privateKeyIv = String(privateKeyIv).trim();
+      recipient.privateKeySalt = String(privateKeySalt).trim();
+      await recipient.save();
+      await User.updateOne(
+        { _id: recipient._id },
+        { $unset: { keyActionId: 1 } },
+      );
+
+      res.json({
+        ok: true,
+        alreadyProvisioned: false,
+        publicKeySpki: recipient.publicKeySpki,
+        recipientUuid: recipient.uuid,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });

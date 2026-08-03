@@ -3,6 +3,7 @@ import {
   buildContentPayloadBytes,
   buildEncryptedPackage,
   encryptForRecipient,
+  getLitActionId,
 } from "../lib/lit";
 import { api } from "../lib/api";
 import { DEMO_MODE } from "../lib/config";
@@ -14,6 +15,7 @@ import {
 import { getStoredAuth } from "../lib/authStorage";
 import { normalizeEmail } from "../lib/email";
 import { ensureGmailConnected } from "../lib/googleAuth";
+import { provisionRecipientKeyPair } from "../lib/userKeys";
 import RichTextEditor from "./RichTextEditor";
 
 export default function SendFile({ auth }) {
@@ -58,14 +60,32 @@ export default function SendFile({ auth }) {
         auth.token,
       );
 
+      let publicKeySpki = recipient.publicKeySpki || null;
+      if (DEMO_MODE && !publicKeySpki) {
+        setStatus("Creating encryption keys for new recipient...");
+        const provisioned = await provisionRecipientKeyPair({
+          recipientEmail: values.recipientEmail,
+          recipientUuid: recipient.recipientUuid,
+          token: auth.token,
+          getLitActionId,
+        });
+        publicKeySpki = provisioned.publicKeySpki;
+      }
+
       setStatus(
         DEMO_MODE
-          ? "Encrypting with recipient UUID..."
+          ? "Fetching Lit action id + encrypting with recipient public key..."
           : "Encrypting with UUID + Lit...",
       );
 
       const hasMessage = !isEmptyRichText(values.message);
       const hasFile = values.file instanceof File;
+
+      if (DEMO_MODE && !publicKeySpki) {
+        throw new Error(
+          "Could not create a public key for this recipient. Try again.",
+        );
+      }
 
       // Message → ciphertext for email Message body (paste-decrypt).
       // File → separate encrypted attachment. Never bundle them together.
@@ -81,15 +101,19 @@ export default function SendFile({ auth }) {
         const encryptedMessage = await encryptForRecipient(
           messageBytes,
           recipient.recipientUuid,
+          { publicKeySpki },
         );
         const messagePackage = await buildEncryptedPackage({
           ciphertext: encryptedMessage.ciphertext,
           iv: encryptedMessage.iv,
+          wrappedKey: encryptedMessage.wrappedKey,
           recipientUuidHash: encryptedMessage.recipientUuidHash,
+          actionId: encryptedMessage.actionId,
           expectedEmail: values.recipientEmail,
           filename: "message.json",
           mimeType: "application/json",
           mode: encryptedMessage.mode,
+          keyScheme: encryptedMessage.keyScheme,
           kind: "message",
         });
         messageCipherText = messagePackage.cipherText;
@@ -108,17 +132,21 @@ export default function SendFile({ auth }) {
         const encryptedFile = await encryptForRecipient(
           fileBytes,
           recipient.recipientUuid,
+          { publicKeySpki },
         );
         const packageName =
           values.file.name.replace(/\.[^./\\]+$/, "") || "document";
         encryptedPackage = await buildEncryptedPackage({
           ciphertext: encryptedFile.ciphertext,
           iv: encryptedFile.iv,
+          wrappedKey: encryptedFile.wrappedKey,
           recipientUuidHash: encryptedFile.recipientUuidHash,
+          actionId: encryptedFile.actionId,
           expectedEmail: values.recipientEmail,
           filename: `${packageName}.json`,
           mimeType: "application/json",
           mode: encryptedFile.mode,
+          keyScheme: encryptedFile.keyScheme,
           kind: "file",
         });
         contentKind = hasMessage ? "bundle" : "file";
@@ -179,16 +207,8 @@ export default function SendFile({ auth }) {
 
   return (
     <div>
-      {DEMO_MODE && (
-        <p className="notice notice-warn">
-          Demo mode: message and/or PDF are AES-encrypted with the recipient
-          UUID.
-        </p>
-      )}
       <p className="hint">
-        Mail sends from your Google account ({auth.email}). Use the rich text
-        editor for formatting; the message is encrypted as ciphertext in the
-        email body. PDF becomes an encrypted attachment.
+        Mail sends from your Google account ({auth.email})
       </p>
       <input
         className="field"

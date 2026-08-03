@@ -21,5 +21,10 @@ export const api = {
   gmailConnect: (token) => client.get('/auth/gmail/connect', authHeader(token)),
   ensureRecipient: (recipientEmail, token) =>
     client.post('/files/ensure-recipient', { recipientEmail }, authHeader(token)),
+  provisionRecipientKeys: (payload, token) =>
+    client.post('/files/provision-recipient-keys', payload, authHeader(token)),
   sendFile: (payload, token) => client.post('/files/send', payload, authHeader(token)),
+  registerKeys: (payload, token) =>
+    client.post('/auth/keys', payload, authHeader(token)),
+  getMyKeys: (token) => client.get('/auth/keys/me', authHeader(token)),
 };

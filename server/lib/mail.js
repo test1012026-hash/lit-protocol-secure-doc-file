@@ -198,9 +198,7 @@ ${openButton}
   Log in with the recipient account to decrypt.
 </p>
 <p style="color:gray">${
-    demoMode
-      ? "Demo mode enabled."
-      : "Only the recipient account can decrypt this file."
+   "Only the recipient account can decrypt this file."
   }</p>
 `;
 

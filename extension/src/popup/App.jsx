@@ -10,6 +10,9 @@ import {
   saveActiveTab,
   saveAuth,
 } from "../lib/authStorage";
+import { ensureUserKeyPair } from "../lib/userKeys";
+import { DEMO_MODE } from "../lib/config";
+import { getLitActionId } from "../lib/lit";
 
 export default function App() {
   const [auth, setAuth] = useState(null);
@@ -40,10 +43,47 @@ export default function App() {
   }, []);
 
   const handleLogin = async (authData) => {
-    await saveAuth(authData);
-    setAuth(authData);
+    let next = authData;
+    if (DEMO_MODE) {
+      try {
+        await ensureUserKeyPair(authData, getLitActionId);
+        next = {
+          ...authData,
+          hasPublicKey: true,
+        };
+      } catch (err) {
+        console.error("Key setup failed:", err);
+        throw err;
+      }
+    }
+    await saveAuth(next);
+    setAuth(next);
     setShowSetPassword(false);
   };
+
+  // Existing sessions: create/upload keys once if missing.
+  useEffect(() => {
+    if (!auth?.token || !DEMO_MODE) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await ensureUserKeyPair(auth, getLitActionId);
+        if (!cancelled && !auth.hasPublicKey) {
+          const next = {
+            ...auth,
+            hasPublicKey: true,
+          };
+          await saveAuth(next);
+          setAuth(next);
+        }
+      } catch (err) {
+        console.error("Key setup failed:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.uuid, auth?.token]);
 
   const handleLogout = async () => {
     await clearAuth();

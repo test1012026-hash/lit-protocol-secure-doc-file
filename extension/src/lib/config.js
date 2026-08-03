@@ -1,6 +1,8 @@
 function env(key, fallback) {
   const value = import.meta.env[key];
-  if (value !== undefined && value !== "") return value;
+  if (value !== undefined && value !== "") {
+    return String(value).trim().replace(/^["']|["']$/g, "");
+  }
   if (fallback !== undefined) return fallback;
   throw new Error(`Missing required environment variable: ${key}`);
 }
@@ -12,7 +14,9 @@ export const GOOGLE_CLIENT_ID = env("VITE_GOOGLE_CLIENT_ID");
 export const GOOGLE_GMAIL_CLIENT_ID = env("VITE_GOOGLE_GMAIL_CLIENT_ID");
 export const EXTENSION_ID = env("VITE_EXTENSION_ID");
 export const GOOGLE_REDIRECT_URI = `https://${EXTENSION_ID}.chromiumapp.org`;
-export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
+export const DEMO_MODE = String(import.meta.env.VITE_DEMO_MODE || "")
+  .trim()
+  .replace(/^["']|["']$/g, "") === "true";
 export const LIT_NETWORK = env("VITE_LIT_NETWORK", "datil-dev");
 export const LIT_API_BASE = env(
   "VITE_LIT_API_BASE",

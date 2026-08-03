@@ -22,7 +22,7 @@ export default function Login({ onLogin }) {
         mode === "login"
           ? await api.login(values.email, values.password)
           : await api.signup(values.email, values.password);
-      onLogin(data);
+      await onLogin(data);
     } catch (err) {
       setError(err.response?.data?.error || err.message);
     } finally {
@@ -42,7 +42,7 @@ export default function Login({ onLogin }) {
     try {
       const idToken = await googleSignIn();
       const { data } = await api.loginGoogle(idToken);
-      onLogin({ ...data, googleIdToken: idToken });
+      await onLogin({ ...data, googleIdToken: idToken });
     } catch (err) {
       setError(
         err.message.includes(oauthSetup.redirectUri)

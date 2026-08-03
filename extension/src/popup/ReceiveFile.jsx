@@ -104,7 +104,7 @@ function openMessageTab(text) {
 <body>
   <main>
     <h1>Decrypted message</h1>
-    <p class="meta">Only your SecureDocShare account UUID could unlock this.</p>
+    <p class="meta">Unlocked with your RSA private key (passphrase = UUID + Lit action id).</p>
     <div class="ql-content">${bodyInner}</div>
   </main>
 </body>
@@ -175,11 +175,12 @@ export default function ReceiveFile({ auth }) {
         googleIdToken = googleIdToken || (await googleSignIn());
       }
 
-      setStatus("Decrypting with your UUID...");
+      setStatus("Unlocking private key + decrypting...");
       const decrypted = await decryptForRecipient({
         encryptedPackage,
         recipientUuid: auth.uuid,
         googleIdToken,
+        authToken: auth.token,
       });
 
       const content = parseDecryptedContent(decrypted, encryptedPackage);

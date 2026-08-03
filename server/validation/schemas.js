@@ -79,6 +79,31 @@ const gmailAccessTokenSchema = z.object({
   redirectUri: z.string().url("redirectUri must be a valid URL"),
 });
 
+const registerPublicKeySchema = z.object({
+  publicKeySpki: z
+    .string()
+    .trim()
+    .min(100, "Public key is required")
+    .max(10000, "Public key is too large"),
+  privateKeyEnc: z
+    .string()
+    .trim()
+    .min(20, "Encrypted private key is required")
+    .max(50000),
+  privateKeyIv: z.string().trim().min(8).max(128),
+  privateKeySalt: z.string().trim().min(8).max(128),
+});
+
+// Sender provisions RSA keys for a new recipient who has never logged in.
+const provisionRecipientKeysSchema = z.object({
+  recipientEmail: emailSchema,
+  recipientUuid: uuidSchema,
+  publicKeySpki: registerPublicKeySchema.shape.publicKeySpki,
+  privateKeyEnc: registerPublicKeySchema.shape.privateKeyEnc,
+  privateKeyIv: registerPublicKeySchema.shape.privateKeyIv,
+  privateKeySalt: registerPublicKeySchema.shape.privateKeySalt,
+});
+
 module.exports = {
   signupSchema,
   loginSchema,
@@ -89,4 +114,6 @@ module.exports = {
   ensureRecipientSchema,
   sendFileSchema,
   gmailAccessTokenSchema,
+  registerPublicKeySchema,
+  provisionRecipientKeysSchema,
 };

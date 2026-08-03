@@ -5,6 +5,11 @@ import {
   LIT_API_KEY,
   LIT_PKP_ID,
 } from "./config";
+import {
+  hybridDecryptWithPrivateKey,
+  hybridEncryptForPublicKey,
+  loadPrivateKeyFromServer,
+} from "./userKeys";
 
 function bytesToBase64(bytes) {
   let binary = "";
@@ -122,10 +127,99 @@ async function callLitAction(code, jsParams) {
 }
 
 /**
- * Encrypt PDF bytes with a key derived from the recipient UUID.
- * Without that UUID, the file cannot be decrypted (ChatGPT/others cannot open it).
+ * Fetch registered Lit Action IDs from Chipotle list_actions.
  */
-export async function encryptForRecipient(messageBytes, recipientUuid) {
+export async function listLitActions() {
+  if (!LIT_API_KEY) {
+    throw new Error("VITE_LIT_API_KEY is required to list Lit actions.");
+  }
+
+  const fetchPage = async (pageNumber) => {
+    const res = await fetch(
+      `${LIT_API_BASE}/list_actions?page_number=${pageNumber}&page_size=10`,
+      {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+          "X-Api-Key": LIT_API_KEY,
+        },
+      },
+    );
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      throw new Error(`list_actions HTTP ${res.status}: ${errBody}`);
+    }
+
+    const data = await res.json();
+    return Array.isArray(data)
+      ? data
+      : Array.isArray(data?.actions)
+        ? data.actions
+        : [];
+  };
+
+  const first = (await fetchPage(0)).filter((a) => a?.id);
+  if (first.length) return first;
+
+  // Some dashboards use 1-based paging (as in the Chipotle curl example).
+  return (await fetchPage(1)).filter((a) => a?.id);
+}
+
+/**
+ * Get the Lit Action ID used for encrypt/decrypt binding.
+ * Prefer a named action, otherwise the first registered action.
+ */
+export async function getLitActionId() {
+  const actions = await listLitActions();
+  if (!actions.length) {
+    throw new Error(
+      "No Lit actions found. Register an IPFS action in the Chipotle Dashboard first.",
+    );
+  }
+
+  const named =
+    actions.find((a) => /encrypt|secure|demo/i.test(String(a.name || ""))) ||
+    actions[0];
+  return named.id;
+}
+
+async function assertActionIdAllowed(actionId) {
+  if (!actionId) {
+    throw new Error("Encrypted package is missing Lit action id.");
+  }
+
+  try {
+    const actions = await listLitActions();
+    const ok = actions.some(
+      (a) => String(a.id).toLowerCase() === String(actionId).toLowerCase(),
+    );
+    if (!ok) {
+      throw new Error(
+        "Lit action id is not registered on this account. Re-send the file or add the action in the Dashboard.",
+      );
+    }
+  } catch (err) {
+    // If Lit list_actions is unavailable, still allow RSA hybrid decrypt —
+    // action id remains in the package for audit, keys unlock via UUID+actionId.
+    if (/list_actions|LIT_API_KEY|HTTP|fetch|network/i.test(String(err.message || ""))) {
+      console.warn("list_actions check skipped:", err.message);
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Encrypt message/file bytes for a recipient.
+ * Demo mode: per-email AES key wrapped with recipient RSA public key (+ Lit action id).
+ * Lit mode: UUID-AES then Lit PKP encrypt.
+ */
+export async function encryptForRecipient(
+  messageBytes,
+  recipientUuid,
+  { publicKeySpki } = {},
+) {
   if (!recipientUuid) {
     throw new Error("Recipient UUID is required for encryption");
   }
@@ -135,24 +229,38 @@ export async function encryptForRecipient(messageBytes, recipientUuid) {
       ? messageBytes
       : new Uint8Array(messageBytes);
 
-  const uuidEncrypted = await encryptWithUuid(bytes, recipientUuid);
+  const recipientUuidHash = await sha256Hex(recipientUuid);
 
-  // Demo mode: UUID-AES only (still real crypto — not plain base64).
+  // Demo: public-key encrypt (new AES key every mail) + Lit action id binding.
   if (DEMO_MODE) {
+    if (!publicKeySpki) {
+      throw new Error(
+        "Recipient has no public key. Re-send so keys can be created for them.",
+      );
+    }
+
+    const actionId = await getLitActionId();
+    const hybrid = await hybridEncryptForPublicKey(bytes, publicKeySpki);
+
     return {
-      ciphertext: uuidEncrypted.ciphertext,
-      iv: uuidEncrypted.iv,
-      recipientUuidHash: await sha256Hex(recipientUuid),
+      ciphertext: hybrid.ciphertext,
+      iv: hybrid.iv,
+      wrappedKey: hybrid.wrappedKey,
+      recipientUuidHash,
+      actionId,
       mode: "demo",
+      keyScheme: "rsa-oaep+aes-gcm",
     };
   }
 
-  // Lit mode: encrypt UUID-AES payload further with Lit, then gate decrypt with Google email.
+  // Lit mode: UUID-AES then Lit encrypt.
+  const uuidEncrypted = await encryptWithUuid(bytes, recipientUuid);
   const litPayload = JSON.stringify({
     ciphertext: uuidEncrypted.ciphertext,
     iv: uuidEncrypted.iv,
   });
 
+  const actionId = await getLitActionId();
   const code = `
     async function main({ pkpId, message }) {
       const ciphertext = await Lit.Actions.Encrypt({ pkpId, message });
@@ -168,7 +276,9 @@ export async function encryptForRecipient(messageBytes, recipientUuid) {
   return {
     ciphertext: result.ciphertext,
     iv: null,
-    recipientUuidHash: await sha256Hex(recipientUuid),
+    wrappedKey: null,
+    recipientUuidHash,
+    actionId,
     mode: "lit",
   };
 }
@@ -261,28 +371,33 @@ export function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
 export async function buildEncryptedPackage({
   ciphertext,
   iv,
+  wrappedKey,
   recipientUuidHash,
+  actionId,
   expectedEmail,
   filename,
   mimeType,
   mode,
+  keyScheme,
   kind = "bundle",
 }) {
   const safeFileName = filename || "secure-package.json";
   const encryptedName =
     safeFileName.replace(/\.[^./\\]+$/, "") || "secure-package";
   const payload = {
-    version: 2,
+    version: 3,
     type: "secure-doc-share",
     kind,
     mode,
-    // Delivery metadata only — decrypt is gated by recipientUuidHash, not email.
+    keyScheme: keyScheme || null,
     expectedEmail,
     recipientUuidHash,
+    actionId: actionId || null,
     filename: safeFileName,
     mimeType: mimeType || "application/json",
     ciphertext,
     iv,
+    wrappedKey: wrappedKey || null,
   };
 
   const ext = kind === "file" ? "securepdf" : "securemsg";
@@ -290,22 +405,23 @@ export async function buildEncryptedPackage({
     fileName: `${encryptedName}.${ext}`,
     text: JSON.stringify(payload, null, 2),
     base64: stringToBase64(JSON.stringify(payload)),
-    // Opaque string for email Message body / Receive → Paste ciphertext.
     cipherText: toCipherText(payload),
   };
 }
 
 /**
  * Pack package fields into one ciphertext string the user can copy/paste.
- * Looks like normal ciphertext — not pretty JSON.
  */
 export function toCipherText(pkg) {
   const raw = JSON.stringify({
-    v: 2,
+    v: 3,
     mode: pkg.mode || "demo",
     kind: pkg.kind || "bundle",
     h: pkg.recipientUuidHash,
+    a: pkg.actionId || null,
+    ks: pkg.keyScheme || null,
     iv: pkg.iv || null,
+    wk: pkg.wrappedKey || null,
     c: pkg.ciphertext,
   });
   return `sds.${stringToBase64(raw)}`;
@@ -315,23 +431,31 @@ function packageFromCipherPayload(o) {
   if (!o?.c || !o?.h) return null;
   const kind = o.kind || "bundle";
   return {
-    version: 2,
+    version: o.v || 3,
     type: "secure-doc-share",
     kind,
     mode: o.mode || "demo",
+    keyScheme: o.ks || o.keyScheme || null,
     recipientUuidHash: o.h,
+    actionId: o.a || o.actionId || null,
     filename: kind === "file" ? "document.pdf" : "message.json",
-    // Message/file payloads are JSON wrappers; only legacy raw PDFs used application/pdf.
     mimeType: "application/json",
     ciphertext: o.c,
     iv: o.iv || null,
+    wrappedKey: o.wk || o.wrappedKey || null,
   };
 }
 
 export function parseEncryptedPackage(packageText) {
-  const trimmed = String(packageText || "").trim();
+  let trimmed = String(packageText || "").trim();
   if (!trimmed) {
     throw new Error("Encrypted package is empty.");
+  }
+
+  // Email clients often insert spaces/newlines into long ciphertext.
+  const compact = trimmed.replace(/\s+/g, "");
+  if (compact.startsWith("sds.")) {
+    trimmed = compact;
   }
 
   // Preferred: single ciphertext token (sds.<base64>)
@@ -341,9 +465,13 @@ export function parseEncryptedPackage(packageText) {
       const parsed = packageFromCipherPayload(JSON.parse(raw));
       if (parsed) return parsed;
     } catch {
-      throw new Error("Invalid ciphertext. Copy the full Message from the email.");
+      throw new Error(
+        "Invalid ciphertext. Copy the full Message from the email (no missing characters).",
+      );
     }
-    throw new Error("Invalid ciphertext. Copy the full Message from the email.");
+    throw new Error(
+      "Invalid ciphertext. Copy the full Message from the email (no missing characters).",
+    );
   }
 
   // Legacy SDS2|… token
@@ -404,13 +532,14 @@ export function parseEncryptedPackage(packageText) {
 }
 
 /**
- * Decrypt only if the logged-in user's UUID matches the package hash.
- * Email in the package is delivery metadata only — aliases must not block decrypt.
+ * Decrypt: demo uses MongoDB private key unlocked by uuid+Lit action id;
+ * Lit mode uses Google + Lit + UUID-AES.
  */
 export async function decryptForRecipient({
   encryptedPackage,
   recipientUuid,
   googleIdToken,
+  authToken,
 }) {
   if (!recipientUuid) {
     throw new Error("Your account UUID is missing. Log out and log in again.");
@@ -423,11 +552,48 @@ export async function decryptForRecipient({
     );
   }
 
-  // Demo / UUID layer
+  // Demo: unlock RSA private key from MongoDB, unwrap per-mail AES key.
   if (encryptedPackage.mode === "demo" || DEMO_MODE) {
     if (!encryptedPackage.iv) {
       throw new Error("Encrypted file is missing IV.");
     }
+
+    if (encryptedPackage.actionId) {
+      await assertActionIdAllowed(encryptedPackage.actionId);
+    }
+
+    if (encryptedPackage.wrappedKey) {
+      if (!authToken) {
+        throw new Error(
+          "Auth token required to load your private key from the server.",
+        );
+      }
+      try {
+        const privateKey = await loadPrivateKeyFromServer(
+          { uuid: recipientUuid, token: authToken },
+          getLitActionId,
+          encryptedPackage.actionId,
+        );
+        return await hybridDecryptWithPrivateKey(
+          {
+            ciphertext: encryptedPackage.ciphertext,
+            iv: encryptedPackage.iv,
+            wrappedKey: encryptedPackage.wrappedKey,
+          },
+          privateKey,
+        );
+      } catch (err) {
+        const msg = String(err?.message || err);
+        if (/OperationError|decrypt|unwrap|private key/i.test(msg)) {
+          throw new Error(
+            "Decrypt failed. Use the recipient account that owns this mail, ensure RSA keys exist (log out/in once), then re-send if keys were regenerated after this email.",
+          );
+        }
+        throw err;
+      }
+    }
+
+    // Legacy demo packages (UUID-only, no wrappedKey).
     return decryptWithUuid(
       encryptedPackage.ciphertext,
       encryptedPackage.iv,
@@ -435,8 +601,10 @@ export async function decryptForRecipient({
     );
   }
 
-  // Lit mode: require a valid Google session, then Lit decrypt + UUID-AES.
-  // Do not compare emails — UUID is the recipient lock (alias-safe).
+  if (encryptedPackage.actionId) {
+    await assertActionIdAllowed(encryptedPackage.actionId);
+  }
+
   const code = `
     async function main({ pkpId, ciphertext, googleIdToken, googleClientId }) {
       try {

@@ -26,6 +26,7 @@ const {
   passwordResetCompleteSchema,
   passwordResetVerifySchema,
   gmailAccessTokenSchema,
+  registerPublicKeySchema,
 } = require("../validation/schemas");
 
 const router = express.Router();
@@ -54,6 +55,7 @@ function userPayload(user) {
     email: user.email,
     hasPassword: Boolean(user.passwordHash),
     gmailConnected: Boolean(user.gmailRefreshToken),
+    hasPublicKey: Boolean(user.publicKeySpki && user.privateKeyEnc),
   };
 }
 
@@ -279,6 +281,69 @@ router.post(
     }
   },
 );
+
+router.post(
+  "/keys",
+  authMiddleware,
+  validateBody(registerPublicKeySchema),
+  async (req, res) => {
+    try {
+      const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const {
+        publicKeySpki,
+        privateKeyEnc,
+        privateKeyIv,
+        privateKeySalt,
+      } = req.body;
+
+      user.publicKeySpki = String(publicKeySpki).trim();
+      user.privateKeyEnc = String(privateKeyEnc).trim();
+      user.privateKeyIv = String(privateKeyIv).trim();
+      user.privateKeySalt = String(privateKeySalt).trim();
+      await user.save();
+      // Drop legacy keyActionId if it still exists in older documents.
+      await User.updateOne(
+        { _id: user._id },
+        { $unset: { keyActionId: 1 } },
+      );
+
+      res.json({
+        ok: true,
+        hasPublicKey: true,
+        uuid: user.uuid,
+        email: user.email,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+router.get("/keys/me", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const hasKeys = Boolean(
+      user.publicKeySpki &&
+        user.privateKeyEnc &&
+        user.privateKeyIv &&
+        user.privateKeySalt,
+    );
+
+    res.json({
+      hasPublicKey: hasKeys,
+      publicKeySpki: user.publicKeySpki || null,
+      privateKeyEnc: user.privateKeyEnc || null,
+      privateKeyIv: user.privateKeyIv || null,
+      privateKeySalt: user.privateKeySalt || null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.post("/google/refresh", authMiddleware, async (req, res) => {
   try {
