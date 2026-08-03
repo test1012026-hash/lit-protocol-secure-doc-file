@@ -76,7 +76,7 @@ export default function ResetPassword({ initialEmail = "", onCancel }) {
       )}
 
       <button className="btn btn-ghost" onClick={onCancel}>
-        Back to login
+        Back
       </button>
 
       {error && <p className="error-banner">{error}</p>}

@@ -22,6 +22,8 @@ function base64ToBytes(base64) {
   return bytes;
 }
 
+export { bytesToBase64, base64ToBytes };
+
 function stringToBase64(value) {
   return bytesToBase64(new TextEncoder().encode(value));
 }
@@ -171,6 +173,91 @@ export async function encryptForRecipient(messageBytes, recipientUuid) {
   };
 }
 
+/**
+ * Build plaintext bytes for one encrypted package.
+ * Includes encrypted message text and/or PDF — at least one must be present.
+ */
+export async function buildContentPayloadBytes({ message, file }) {
+  const raw = String(message || "").trim();
+  const textOnly = raw
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const payload = { version: 1 };
+
+  if (textOnly) payload.message = raw;
+
+  if (file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    payload.file = {
+      filename: file.name,
+      mimeType: file.type || "application/pdf",
+      data: bytesToBase64(bytes),
+    };
+  }
+
+  if (!payload.message && !payload.file) {
+    throw new Error("Add a message or a PDF (or both).");
+  }
+
+  return new TextEncoder().encode(JSON.stringify(payload));
+}
+
+export function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
+  const mimeType = (encryptedPackage.mimeType || "").toLowerCase();
+  const kind = encryptedPackage.kind;
+  const filename = encryptedPackage.filename || "";
+
+  // Unified JSON payload (message-only, file-only, or legacy bundle)
+  if (
+    kind === "bundle" ||
+    kind === "message" ||
+    kind === "file" ||
+    mimeType === "application/json"
+  ) {
+    try {
+      const obj = JSON.parse(new TextDecoder().decode(decryptedBytes));
+      if (obj && (typeof obj.message === "string" || obj.file)) {
+        return {
+          message: typeof obj.message === "string" ? obj.message : null,
+          file: obj.file
+            ? {
+                filename: obj.file.filename || "document.pdf",
+                mimeType: obj.file.mimeType || "application/pdf",
+                bytes: base64ToBytes(obj.file.data),
+              }
+            : null,
+        };
+      }
+    } catch {
+      // fall through to legacy handling
+    }
+  }
+
+  // Legacy message package (raw text bytes)
+  if (
+    kind === "message" ||
+    mimeType.startsWith("text/") ||
+    filename.toLowerCase().endsWith(".txt")
+  ) {
+    return {
+      message: new TextDecoder().decode(decryptedBytes),
+      file: null,
+    };
+  }
+
+  // Legacy PDF / file package
+  return {
+    message: null,
+    file: {
+      filename: filename || "document.pdf",
+      mimeType: encryptedPackage.mimeType || "application/pdf",
+      bytes: decryptedBytes,
+    },
+  };
+}
+
 export async function buildEncryptedPackage({
   ciphertext,
   iv,
@@ -179,43 +266,141 @@ export async function buildEncryptedPackage({
   filename,
   mimeType,
   mode,
+  kind = "bundle",
 }) {
-  const safeFileName = filename || "document.pdf";
-  const encryptedName = safeFileName.replace(/\.[^./\\]+$/, "") || "document";
+  const safeFileName = filename || "secure-package.json";
+  const encryptedName =
+    safeFileName.replace(/\.[^./\\]+$/, "") || "secure-package";
   const payload = {
     version: 2,
     type: "secure-doc-share",
+    kind,
     mode,
     // Delivery metadata only — decrypt is gated by recipientUuidHash, not email.
     expectedEmail,
     recipientUuidHash,
     filename: safeFileName,
-    mimeType: mimeType || "application/pdf",
+    mimeType: mimeType || "application/json",
     ciphertext,
     iv,
   };
 
+  const ext = kind === "file" ? "securepdf" : "securemsg";
   return {
-    fileName: `${encryptedName}.securepdf`,
+    fileName: `${encryptedName}.${ext}`,
     text: JSON.stringify(payload, null, 2),
     base64: stringToBase64(JSON.stringify(payload)),
+    // Opaque string for email Message body / Receive → Paste ciphertext.
+    cipherText: toCipherText(payload),
+  };
+}
+
+/**
+ * Pack package fields into one ciphertext string the user can copy/paste.
+ * Looks like normal ciphertext — not pretty JSON.
+ */
+export function toCipherText(pkg) {
+  const raw = JSON.stringify({
+    v: 2,
+    mode: pkg.mode || "demo",
+    kind: pkg.kind || "bundle",
+    h: pkg.recipientUuidHash,
+    iv: pkg.iv || null,
+    c: pkg.ciphertext,
+  });
+  return `sds.${stringToBase64(raw)}`;
+}
+
+function packageFromCipherPayload(o) {
+  if (!o?.c || !o?.h) return null;
+  const kind = o.kind || "bundle";
+  return {
+    version: 2,
+    type: "secure-doc-share",
+    kind,
+    mode: o.mode || "demo",
+    recipientUuidHash: o.h,
+    filename: kind === "file" ? "document.pdf" : "message.json",
+    // Message/file payloads are JSON wrappers; only legacy raw PDFs used application/pdf.
+    mimeType: "application/json",
+    ciphertext: o.c,
+    iv: o.iv || null,
   };
 }
 
 export function parseEncryptedPackage(packageText) {
-  const payload = JSON.parse(packageText);
-  if (payload?.type !== "secure-doc-share") {
-    throw new Error("This file is not a SecureDocShare encrypted file.");
+  const trimmed = String(packageText || "").trim();
+  if (!trimmed) {
+    throw new Error("Encrypted package is empty.");
   }
-  if (!payload?.ciphertext) {
-    throw new Error("Encrypted file is missing required fields.");
+
+  // Preferred: single ciphertext token (sds.<base64>)
+  if (trimmed.startsWith("sds.")) {
+    try {
+      const raw = new TextDecoder().decode(base64ToBytes(trimmed.slice(4)));
+      const parsed = packageFromCipherPayload(JSON.parse(raw));
+      if (parsed) return parsed;
+    } catch {
+      throw new Error("Invalid ciphertext. Copy the full Message from the email.");
+    }
+    throw new Error("Invalid ciphertext. Copy the full Message from the email.");
   }
-  if (!payload?.recipientUuidHash) {
-    throw new Error(
-      "This encrypted file has no UUID lock. Ask the sender to re-send with the updated app.",
-    );
+
+  // Legacy SDS2|… token
+  if (trimmed.startsWith("SDS2|")) {
+    const parts = trimmed.split("|");
+    if (parts.length < 6) {
+      throw new Error("Invalid encrypted message token.");
+    }
+    const [, mode, kind, recipientUuidHash, ivPart, ...cipherParts] = parts;
+    const ciphertext = cipherParts.join("|");
+    const parsed = packageFromCipherPayload({
+      mode,
+      kind,
+      h: recipientUuidHash,
+      iv: !ivPart || ivPart === "-" ? null : ivPart,
+      c: ciphertext,
+    });
+    if (parsed) return parsed;
+    throw new Error("Invalid encrypted message token.");
   }
-  return payload;
+
+  // Full JSON package (from attachment file)
+  if (trimmed.startsWith("{")) {
+    let payload;
+    try {
+      payload = JSON.parse(trimmed);
+    } catch {
+      throw new Error("Invalid encrypted package JSON.");
+    }
+    if (payload?.type !== "secure-doc-share") {
+      throw new Error("This is not a SecureDocShare encrypted package.");
+    }
+    if (!payload?.ciphertext) {
+      throw new Error("Encrypted package is missing required fields.");
+    }
+    if (!payload?.recipientUuidHash) {
+      throw new Error(
+        "This encrypted package has no UUID lock. Ask the sender to re-send with the updated app.",
+      );
+    }
+    return payload;
+  }
+
+  // Try bare base64 ciphertext blob (same payload as sds. without prefix)
+  try {
+    const raw = new TextDecoder().decode(base64ToBytes(trimmed));
+    if (raw.startsWith("{")) {
+      const parsed = packageFromCipherPayload(JSON.parse(raw));
+      if (parsed) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+
+  throw new Error(
+    "Paste the full ciphertext from the email Message (starts with sds.), or upload the attachment.",
+  );
 }
 
 /**

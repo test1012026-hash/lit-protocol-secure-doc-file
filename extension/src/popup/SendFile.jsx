@@ -1,11 +1,20 @@
 import React, { useEffect, useRef, useState } from "react";
-import { buildEncryptedPackage, encryptForRecipient } from "../lib/lit";
+import {
+  buildContentPayloadBytes,
+  buildEncryptedPackage,
+  encryptForRecipient,
+} from "../lib/lit";
 import { api } from "../lib/api";
 import { DEMO_MODE } from "../lib/config";
-import { parseOrThrow, sendFileFormSchema } from "../lib/validation";
+import {
+  isEmptyRichText,
+  parseOrThrow,
+  sendFileFormSchema,
+} from "../lib/validation";
 import { getStoredAuth } from "../lib/authStorage";
 import { normalizeEmail } from "../lib/email";
 import { ensureGmailConnected } from "../lib/googleAuth";
+import RichTextEditor from "./RichTextEditor";
 
 export default function SendFile({ auth }) {
   const [recipientEmail, setRecipientEmail] = useState("");
@@ -26,7 +35,7 @@ export default function SendFile({ auth }) {
   const handleSend = async () => {
     try {
       if (normalizeEmail(storedAuth?.email) === normalizeEmail(recipientEmail)) {
-        setStatus("Error: You cannot send a file to yourself");
+        setStatus("Error: You cannot send to yourself");
         return;
       }
 
@@ -54,31 +63,82 @@ export default function SendFile({ auth }) {
           ? "Encrypting with recipient UUID..."
           : "Encrypting with UUID + Lit...",
       );
-      const bytes = new Uint8Array(await values.file.arrayBuffer());
-      const encrypted = await encryptForRecipient(
-        bytes,
-        recipient.recipientUuid,
-      );
-      const encryptedPackage = await buildEncryptedPackage({
-        ciphertext: encrypted.ciphertext,
-        iv: encrypted.iv,
-        recipientUuidHash: encrypted.recipientUuidHash,
-        expectedEmail: values.recipientEmail,
-        filename: values.file.name,
-        mimeType: values.file.type || "application/pdf",
-        mode: encrypted.mode,
-      });
+
+      const hasMessage = !isEmptyRichText(values.message);
+      const hasFile = values.file instanceof File;
+
+      // Message → ciphertext for email Message body (paste-decrypt).
+      // File → separate encrypted attachment. Never bundle them together.
+      let messageCipherText = "";
+      let encryptedPackage = null;
+      let contentKind = "file";
+
+      if (hasMessage) {
+        const messageBytes = await buildContentPayloadBytes({
+          message: values.message,
+          file: null,
+        });
+        const encryptedMessage = await encryptForRecipient(
+          messageBytes,
+          recipient.recipientUuid,
+        );
+        const messagePackage = await buildEncryptedPackage({
+          ciphertext: encryptedMessage.ciphertext,
+          iv: encryptedMessage.iv,
+          recipientUuidHash: encryptedMessage.recipientUuidHash,
+          expectedEmail: values.recipientEmail,
+          filename: "message.json",
+          mimeType: "application/json",
+          mode: encryptedMessage.mode,
+          kind: "message",
+        });
+        messageCipherText = messagePackage.cipherText;
+        // Message-only: attach encrypted message so recipient can also upload it.
+        if (!hasFile) {
+          encryptedPackage = messagePackage;
+          contentKind = "message";
+        }
+      }
+
+      if (hasFile) {
+        const fileBytes = await buildContentPayloadBytes({
+          message: "",
+          file: values.file,
+        });
+        const encryptedFile = await encryptForRecipient(
+          fileBytes,
+          recipient.recipientUuid,
+        );
+        const packageName =
+          values.file.name.replace(/\.[^./\\]+$/, "") || "document";
+        encryptedPackage = await buildEncryptedPackage({
+          ciphertext: encryptedFile.ciphertext,
+          iv: encryptedFile.iv,
+          recipientUuidHash: encryptedFile.recipientUuidHash,
+          expectedEmail: values.recipientEmail,
+          filename: `${packageName}.json`,
+          mimeType: "application/json",
+          mode: encryptedFile.mode,
+          kind: "file",
+        });
+        contentKind = hasMessage ? "bundle" : "file";
+      }
 
       setStatus("Sending via your Gmail...");
       const { data } = await api.sendFile(
         {
           recipientEmail: values.recipientEmail,
           recipientUuid: recipient.recipientUuid,
-          subject: values.subject || values.file.name,
-          message: values.message,
-          filename: values.file.name,
+          subject:
+            values.subject ||
+            (hasFile ? values.file.name : "Secure message"),
+          // Only message ciphertext goes in the email Message field.
+          message: messageCipherText,
+          filename: hasFile ? values.file.name : "message.txt",
+          contentKind,
           encryptedPackageBase64: encryptedPackage.base64,
           encryptedPackageName: encryptedPackage.fileName,
+          encryptedPackageText: encryptedPackage.text,
         },
         auth.token,
       );
@@ -98,11 +158,16 @@ export default function SendFile({ auth }) {
       if (code === "GMAIL_NOT_CONNECTED") {
         try {
           setStatus("Gmail access expired. Reconnecting...");
-          await ensureGmailConnected(auth.token, { ...auth, gmailConnected: false });
+          await ensureGmailConnected(auth.token, {
+            ...auth,
+            gmailConnected: false,
+          });
           setStatus("Gmail reconnected. Click send again.");
           return;
         } catch (retryErr) {
-          setStatus("Error: " + (retryErr.response?.data?.error || retryErr.message));
+          setStatus(
+            "Error: " + (retryErr.response?.data?.error || retryErr.message),
+          );
           return;
         }
       }
@@ -116,12 +181,14 @@ export default function SendFile({ auth }) {
     <div>
       {DEMO_MODE && (
         <p className="notice notice-warn">
-          Demo mode: PDF is AES-encrypted with the recipient UUID.
+          Demo mode: message and/or PDF are AES-encrypted with the recipient
+          UUID.
         </p>
       )}
       <p className="hint">
-        Mail sends from your Google account ({auth.email}). Gmail permission is
-        asked once, then remembered.
+        Mail sends from your Google account ({auth.email}). Use the rich text
+        editor for formatting; the message is encrypted as ciphertext in the
+        email body. PDF becomes an encrypted attachment.
       </p>
       <input
         className="field"
@@ -135,13 +202,11 @@ export default function SendFile({ auth }) {
         value={subject}
         onChange={(e) => setSubject(e.target.value)}
       />
-      <textarea
-        className="field"
-        placeholder="Message"
+      <RichTextEditor
         value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        rows={4}
-        style={{ resize: "vertical" }}
+        onChange={setMessage}
+        placeholder="Message (encrypted as rich text)"
+        disabled={loading}
       />
       <input
         ref={fileInputRef}
@@ -154,7 +219,13 @@ export default function SendFile({ auth }) {
         {loading ? "Working..." : "Encrypt and send"}
       </button>
       {status && (
-        <p className={status.startsWith("Error") ? "error-banner" : "status-text status-ok"}>
+        <p
+          className={
+            status.startsWith("Error")
+              ? "error-banner"
+              : "status-text status-ok"
+          }
+        >
           {status}
         </p>
       )}

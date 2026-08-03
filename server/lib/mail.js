@@ -126,8 +126,10 @@ async function sendEncryptedFileEmail({
   senderEmail,
   subject,
   message,
+  contentKind = "file",
   attachmentName,
   attachmentBase64,
+  encryptedPackageText = "",
   demoMode,
   gmailAccessToken,
   senderRefreshToken,
@@ -139,37 +141,66 @@ async function sendEncryptedFileEmail({
   const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
   const openUrl = appUrl ? `${appUrl}/open-extension` : null;
 
-  const text = [
-    `${senderEmail} sent you a secure file.`,
-    "",
-    message || "",
-    "",
-    "Open SecureDocShare → Receive → upload the attachment.",
-    openUrl ? `\nOpen extension: ${openUrl}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  // Only the sender's message ciphertext goes in the email Message field.
+  // File packages stay on the attachment — do not convert the attachment into Message.
+  const displayMessage = String(message || "").trim();
+  const hasAttachment = Boolean(attachmentBase64);
 
   const openButton = openUrl
     ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`
     : "<p>Click the SecureDocShare icon in Chrome to open the extension.</p>";
 
+  const text = [
+    `${senderEmail} sent you a secure file.`,
+    "",
+    displayMessage ? `Message:\n${displayMessage}` : "",
+    "",
+    displayMessage
+      ? "Open SecureDocShare → Receive → Paste ciphertext → paste the Message above → Decrypt."
+      : "",
+    hasAttachment
+      ? "To open the file: Open SecureDocShare → Receive → Upload file → Decrypt."
+      : "",
+    openUrl ? `\nOpen extension: ${openUrl}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   const html = `
-<h2>${senderEmail} sent you a secure file</h2>
-${message ? `<p><b>Message:</b><br>${message}</p>` : ""}
-<p>The encrypted file is attached.</p>
+<div style="font-size:16px">${senderEmail} sent you a secure email - This email will be decrypted by <b>Receipient Authorization Verification</b></div>
+${
+  displayMessage
+    ? `<p><b>Message (ciphertext):</b><br><span style="word-break:break-all;font-family:monospace;font-size:12px;color:green">${String(
+        displayMessage,
+      )
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")}</span></p>
+        
+        <p>Copy and paste the Message ciphertext above to decrypt the message</p>`
+    : ""
+}
+${hasAttachment ? "<p>The encrypted file is attached separately.</p>" : ""}
 <ol>
 <li>Open SecureDocShare</li>
 <li>Login with Google</li>
 <li>Go to Receive</li>
-<li>Upload the attached file</li>
+${
+  displayMessage
+    ? "<li>Copy the Message ciphertext above to decrypt the message</li>"
+    : ""
+}
+${hasAttachment ? "<li>Upload the attachment to decrypt the file</li>" : ""}
+<li>Decrypt and open</li>
 </ol>
 ${openButton}
 <p style="color:gray">
-  Log in with the same Google account this email was sent to, then upload the attached <code>.securepdf</code> on the Receive tab.
+  Log in with the recipient account to decrypt.
 </p>
 <p style="color:gray">${
-    demoMode ? "Demo mode enabled." : "Only this email can decrypt this file."
+    demoMode
+      ? "Demo mode enabled."
+      : "Only the recipient account can decrypt this file."
   }</p>
 `;
 

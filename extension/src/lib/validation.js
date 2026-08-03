@@ -26,26 +26,66 @@ export const passwordResetRequestSchema = z.object({
   email: emailSchema,
 });
 
-export const sendFileFormSchema = z.object({
-  recipientEmail: emailSchema,
-  subject: z.string().trim().max(200).optional().default(""),
-  message: z.string().trim().max(5000).optional().default(""),
-  file: z
-    .custom((value) => value instanceof File, {
-      message: "Choose a PDF file to send",
-    })
-    .refine(
-      (file) =>
-        file.type === "application/pdf" ||
-        file.name.toLowerCase().endsWith(".pdf"),
-      "Only PDF files are allowed",
-    )
-    .refine((file) => file.size > 0, "Selected file is empty")
-    .refine(
-      (file) => file.size <= 20 * 1024 * 1024,
-      "PDF must be 20MB or smaller",
-    ),
-});
+/** Treat Quill empty HTML (<p><br></p>, etc.) as blank. */
+export function isEmptyRichText(html) {
+  const raw = String(html || "").trim();
+  if (!raw) return true;
+  const text = raw
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length === 0;
+}
+
+export const sendFileFormSchema = z
+  .object({
+    recipientEmail: emailSchema,
+    subject: z.string().trim().max(200).optional().default(""),
+    message: z.string().max(50000).optional().default(""),
+    file: z.any().optional().nullable(),
+  })
+  .superRefine((data, ctx) => {
+    const hasMessage = !isEmptyRichText(data.message);
+    const file = data.file;
+    const hasFile = file instanceof File;
+
+    if (!hasMessage && !hasFile) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Add a message or a PDF (or both)",
+        path: ["message"],
+      });
+      return;
+    }
+
+    if (!hasFile) return;
+
+    if (
+      file.type !== "application/pdf" &&
+      !file.name.toLowerCase().endsWith(".pdf")
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Only PDF files are allowed",
+        path: ["file"],
+      });
+    }
+    if (file.size <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Selected file is empty",
+        path: ["file"],
+      });
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "PDF must be 20MB or smaller",
+        path: ["file"],
+      });
+    }
+  });
 
 export const receiveFileFormSchema = z.object({
   encryptedFile: z
@@ -55,10 +95,19 @@ export const receiveFileFormSchema = z.object({
     .refine(
       (file) =>
         file.name.toLowerCase().endsWith(".securepdf") ||
-        file.type === "application/json",
-      "Upload a .securepdf file",
+        file.name.toLowerCase().endsWith(".securemsg") ||
+        file.type === "application/json" ||
+        file.type === "text/plain",
+      "Upload a .securepdf or .securemsg file",
     )
     .refine((file) => file.size > 0, "Selected file is empty"),
+});
+
+export const receivePasteFormSchema = z.object({
+  packageText: z
+    .string()
+    .trim()
+    .min(20, "Paste the ciphertext from the email Message"),
 });
 
 export function formatZodError(error) {

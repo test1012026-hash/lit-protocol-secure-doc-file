@@ -51,19 +51,25 @@ const sendFileSchema = z.object({
   recipientEmail: emailSchema,
   recipientUuid: uuidSchema.optional(),
   subject: z.string().trim().max(200).optional().default(""),
-  message: z.string().trim().max(5000).optional().default(""),
+  // Ciphertext (sds.…); larger than plain text because of encryption overhead.
+  message: z.string().trim().max(200000).optional().default(""),
   filename: z.string().trim().min(1, "Filename is required").max(255),
+  contentKind: z.enum(["file", "message", "bundle"]).optional().default("file"),
   encryptedPackageBase64: z
     .string()
     .min(1, "Encrypted package is required"),
+  encryptedPackageText: z.string().optional(),
   encryptedPackageName: z
     .string()
     .trim()
     .min(1, "Encrypted package name is required")
     .max(255)
     .refine(
-      (name) => name.toLowerCase().endsWith(".securepdf"),
-      "Encrypted package must be a .securepdf file",
+      (name) => {
+        const lower = name.toLowerCase();
+        return lower.endsWith(".securepdf") || lower.endsWith(".securemsg");
+      },
+      "Encrypted package must be a .securepdf or .securemsg file",
     ),
   gmailAccessToken: z.string().min(20).optional(),
 });

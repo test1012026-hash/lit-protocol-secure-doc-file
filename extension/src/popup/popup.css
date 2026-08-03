@@ -272,6 +272,97 @@ textarea {
   border-radius: 4px;
 }
 
+/* Quill rich text editor */
+.rich-editor {
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(8, 18, 24, 0.45);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.rich-editor:hover {
+  border-color: rgba(43, 179, 160, 0.45);
+}
+
+.rich-editor:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.rich-editor.is-disabled {
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.rich-editor .quill {
+  display: flex;
+  flex-direction: column;
+}
+
+.rich-editor .ql-toolbar.ql-snow {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: rgba(8, 18, 24, 0.55);
+  padding: 6px 8px;
+}
+
+.rich-editor .ql-container.ql-snow {
+  border: none;
+  font-family: var(--font);
+  font-size: 13px;
+  min-height: 110px;
+  color: var(--text);
+}
+
+.rich-editor .ql-editor {
+  min-height: 110px;
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.rich-editor .ql-editor.ql-blank::before {
+  color: #7f96a0;
+  font-style: normal;
+}
+
+.rich-editor .ql-snow .ql-stroke {
+  stroke: #9db4bd;
+}
+
+.rich-editor .ql-snow .ql-fill {
+  fill: #9db4bd;
+}
+
+.rich-editor .ql-snow .ql-picker {
+  color: #9db4bd;
+}
+
+.rich-editor .ql-snow .ql-picker-options {
+  background: #17303b;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.rich-editor .ql-snow.ql-toolbar button:hover .ql-stroke,
+.rich-editor .ql-snow.ql-toolbar button.ql-active .ql-stroke {
+  stroke: var(--accent);
+}
+
+.rich-editor .ql-snow.ql-toolbar button:hover .ql-fill,
+.rich-editor .ql-snow.ql-toolbar button.ql-active .ql-fill {
+  fill: var(--accent);
+}
+
+.rich-editor .ql-snow a {
+  color: #9fe3d7;
+}
+
 @keyframes fadeRise {
   from {
     opacity: 0;
