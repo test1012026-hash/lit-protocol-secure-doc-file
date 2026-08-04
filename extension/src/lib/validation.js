@@ -78,10 +78,10 @@ export const sendFileFormSchema = z
         path: ["file"],
       });
     }
-    if (file.size > 20 * 1024 * 1024) {
+    if (file.size > 25 * 1024 * 1024) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "PDF must be 20MB or smaller",
+        message: "PDF must be 25MB or smaller (Gmail limit)",
         path: ["file"],
       });
     }
@@ -97,10 +97,15 @@ export const receiveFileFormSchema = z.object({
         file.name.toLowerCase().endsWith(".securepdf") ||
         file.name.toLowerCase().endsWith(".securemsg") ||
         file.type === "application/json" ||
+        file.type === "application/octet-stream" ||
         file.type === "text/plain",
       "Upload a .securepdf or .securemsg file",
     )
-    .refine((file) => file.size > 0, "Selected file is empty"),
+    .refine((file) => file.size > 0, "Selected file is empty")
+    .refine(
+      (file) => file.size <= 25 * 1024 * 1024,
+      "Encrypted file must be 25MB or smaller",
+    ),
 });
 
 export const receivePasteFormSchema = z.object({

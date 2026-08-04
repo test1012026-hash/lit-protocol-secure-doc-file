@@ -4,6 +4,7 @@ import {
   decryptForRecipient,
   parseDecryptedContent,
   parseEncryptedPackage,
+  parseEncryptedPackageFromBytes,
 } from "../lib/lit";
 import { googleSignIn } from "../lib/googleAuth";
 import { DEMO_MODE } from "../lib/config";
@@ -156,18 +157,17 @@ export default function ReceiveFile({ auth }) {
         );
       }
 
-      let rawText;
+      let encryptedPackage;
       if (receiveMode === "paste") {
         const values = parseOrThrow(receivePasteFormSchema, { packageText });
-        rawText = values.packageText;
         setStatus("Reading pasted encrypted package...");
+        encryptedPackage = parseEncryptedPackage(values.packageText);
       } else {
         const values = parseOrThrow(receiveFileFormSchema, { encryptedFile });
         setStatus("Reading encrypted file...");
-        rawText = await values.encryptedFile.text();
+        const buffer = await values.encryptedFile.arrayBuffer();
+        encryptedPackage = parseEncryptedPackageFromBytes(new Uint8Array(buffer));
       }
-
-      const encryptedPackage = parseEncryptedPackage(rawText);
 
       let googleIdToken = auth.googleIdToken || null;
       if (!DEMO_MODE && encryptedPackage.mode === "lit") {

@@ -19,6 +19,8 @@ export const api = {
   requestPasswordReset: (email) => client.post('/auth/password-reset/request', { email }),
   gmailStatus: (token) => client.get('/auth/gmail/status', authHeader(token)),
   gmailConnect: (token) => client.get('/auth/gmail/connect', authHeader(token)),
+  gmailSendToken: (token) =>
+    client.post('/auth/gmail/send-token', {}, authHeader(token)),
   ensureRecipient: (recipientEmail, token) =>
     client.post('/files/ensure-recipient', { recipientEmail }, authHeader(token)),
   provisionRecipientKeys: (payload, token) =>

@@ -179,6 +179,7 @@ router.post(
         encryptedPackageText,
         recipientUuid,
         gmailAccessToken,
+        clientSend,
       } = req.body;
       const recipient = await ensureRecipientByEmail(recipientEmail);
       if (recipientUuid && recipient.uuid !== recipientUuid) {
@@ -191,7 +192,7 @@ router.post(
       if (!sender) {
         return res.status(401).json({ error: "Sender account not found" });
       }
-      if (!sender.gmailRefreshToken && !gmailAccessToken) {
+      if (!sender.gmailRefreshToken && !gmailAccessToken && !clientSend) {
         return res.status(403).json({
           error: "Allow Gmail access once to send from your address.",
           code: "GMAIL_NOT_CONNECTED",
@@ -199,6 +200,27 @@ router.post(
       }
 
       const normalizedSubject = subject || filename || "Untitled document";
+      const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+
+      // Default path: extension sends the email (avoids Vercel 4.5MB body limit).
+      if (clientSend !== false || !encryptedPackageBase64) {
+        if (!sender.gmailRefreshToken) {
+          return res.status(403).json({
+            error: "Allow Gmail access once to send from your address.",
+            code: "GMAIL_NOT_CONNECTED",
+          });
+        }
+        return res.json({
+          recipientUuid: recipient.uuid,
+          recipientClaimed: recipient.claimed,
+          emailSent: false,
+          clientSendRequired: true,
+          from: sender.email,
+          subject: normalizedSubject,
+          appUrl,
+        });
+      }
+
       let emailSent = false;
       try {
         emailSent = await sendEncryptedFileEmail({
@@ -237,6 +259,7 @@ router.post(
         recipientClaimed: recipient.claimed,
         emailSent,
         from: sender.email,
+        appUrl,
       });
     } catch (err) {
       console.log("err -->", err);

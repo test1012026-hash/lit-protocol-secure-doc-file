@@ -16,6 +16,7 @@ import { getStoredAuth } from "../lib/authStorage";
 import { normalizeEmail } from "../lib/email";
 import { ensureGmailConnected } from "../lib/googleAuth";
 import { provisionRecipientKeyPair } from "../lib/userKeys";
+import { sendEncryptedEmailViaGmail } from "../lib/gmailSend";
 import RichTextEditor from "./RichTextEditor";
 
 export default function SendFile({ auth }) {
@@ -152,7 +153,7 @@ export default function SendFile({ auth }) {
         contentKind = hasMessage ? "bundle" : "file";
       }
 
-      setStatus("Sending via your Gmail...");
+      setStatus("Preparing send...");
       const { data } = await api.sendFile(
         {
           recipientEmail: values.recipientEmail,
@@ -160,21 +161,32 @@ export default function SendFile({ auth }) {
           subject:
             values.subject ||
             (hasFile ? values.file.name : "Secure message"),
-          // Only message ciphertext goes in the email Message field.
           message: messageCipherText,
           filename: hasFile ? values.file.name : "message.txt",
           contentKind,
-          encryptedPackageBase64: encryptedPackage.base64,
-          encryptedPackageName: encryptedPackage.fileName,
-          encryptedPackageText: encryptedPackage.text,
+          clientSend: true,
         },
         auth.token,
       );
 
+      setStatus("Sending via your Gmail...");
+      const { data: tokenData } = await api.gmailSendToken(auth.token);
+      await sendEncryptedEmailViaGmail({
+        accessToken: tokenData.accessToken,
+        from: data.from || tokenData.from || auth.email,
+        to: values.recipientEmail,
+        subject: data.subject || values.subject || values.file?.name || "Secure message",
+        message: messageCipherText,
+        attachmentName: encryptedPackage?.fileName,
+        attachmentBytes: encryptedPackage?.attachmentBytes || null,
+        attachmentBase64: encryptedPackage?.attachmentBytes
+          ? null
+          : encryptedPackage?.base64 || null,
+        appUrl: data.appUrl || tokenData.appUrl,
+      });
+
       setStatus(
-        data.emailSent
-          ? `Sent from ${data.from || auth.email} to ${values.recipientEmail}.`
-          : "Email could not be sent.",
+        `Sent from ${data.from || auth.email} to ${values.recipientEmail}.`,
       );
       setRecipientEmail("");
       setSubject("");
@@ -182,7 +194,7 @@ export default function SendFile({ auth }) {
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
-      const code = err.response?.data?.code;
+      const code = err.response?.data?.code || err.code;
       if (code === "GMAIL_NOT_CONNECTED") {
         try {
           setStatus("Gmail access expired. Reconnecting...");

@@ -111,11 +111,30 @@ function gmailClientForRefreshToken(refreshToken) {
   return google.gmail({ version: "v1", auth: client });
 }
 
+/** Mint a short-lived Gmail access token from the stored refresh token. */
+async function getGmailAccessTokenFromRefresh(refreshToken) {
+  if (!refreshToken) {
+    throw new Error("Gmail refresh token is missing");
+  }
+  const client = getOAuthClient();
+  client.setCredentials({ refresh_token: refreshToken });
+  const tokenResponse = await client.getAccessToken();
+  const accessToken =
+    typeof tokenResponse === "string"
+      ? tokenResponse
+      : tokenResponse?.token || null;
+  if (!accessToken) {
+    throw new Error("Could not refresh Gmail access token");
+  }
+  return accessToken;
+}
+
 module.exports = {
   getOAuthClient,
   getGmailAuthUrl,
   exchangeCodeForTokens,
   gmailClientForRefreshToken,
+  getGmailAccessTokenFromRefresh,
   createConnectState,
   consumeConnectState,
   getGoogleOAuthAudience,

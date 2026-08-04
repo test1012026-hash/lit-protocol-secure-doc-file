@@ -28,6 +28,8 @@
   "host_permissions": [
     "https://*.litprotocol.com/*",
     "https://oauth2.googleapis.com/*",
+    "https://www.googleapis.com/*",
+    "https://gmail.googleapis.com/*",
     "https://api.devnet.solana.com/*",
     "https://*.solana.com/*",
     "https://*.g.alchemy.com/*",

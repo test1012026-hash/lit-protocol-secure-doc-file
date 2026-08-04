@@ -15,6 +15,7 @@ const {
   consumeConnectState,
   getGoogleOAuthAudience,
   verifyGoogleIdToken,
+  getGmailAccessTokenFromRefresh,
 } = require("../lib/gmailAuth");
 const authMiddleware = require("../middleware/auth");
 const { validateBody, validateQuery } = require("../middleware/validate");
@@ -427,6 +428,46 @@ router.get("/gmail/status", authMiddleware, async (req, res) => {
     const user = await User.findOne({ uuid: req.user.uuid });
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json({ gmailConnected: Boolean(user.gmailRefreshToken) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Short-lived access token so the extension can send large attachments via Gmail (bypasses Vercel 4.5MB body limit). */
+router.post("/gmail/send-token", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (!user.gmailRefreshToken) {
+      return res.status(403).json({
+        error: "Allow Gmail access once to send from your address.",
+        code: "GMAIL_NOT_CONNECTED",
+      });
+    }
+
+    try {
+      const accessToken = await getGmailAccessTokenFromRefresh(
+        user.gmailRefreshToken,
+      );
+      res.json({
+        accessToken,
+        from: user.email,
+        appUrl: (process.env.APP_URL || "").replace(/\/$/, ""),
+      });
+    } catch (tokenErr) {
+      const msg = tokenErr.message || String(tokenErr);
+      if (/invalid_grant|token has been expired|revoked/i.test(msg)) {
+        await User.updateOne(
+          { uuid: req.user.uuid },
+          { $unset: { gmailRefreshToken: 1 } },
+        );
+        return res.status(403).json({
+          error: "Gmail access expired. Allow Gmail again to continue sending.",
+          code: "GMAIL_NOT_CONNECTED",
+        });
+      }
+      throw tokenErr;
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

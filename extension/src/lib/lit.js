@@ -15,13 +15,14 @@ function bytesToBase64(bytes) {
   let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
   }
   return btoa(binary);
 }
 
 function base64ToBytes(base64) {
-  const binary = atob(base64);
+  const cleaned = String(base64 || "").replace(/\s+/g, "");
+  const binary = atob(cleaned);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
@@ -31,6 +32,114 @@ export { bytesToBase64, base64ToBytes };
 
 function stringToBase64(value) {
   return bytesToBase64(new TextEncoder().encode(value));
+}
+
+function writeUint32BE(view, offset, value) {
+  view[offset] = (value >>> 24) & 0xff;
+  view[offset + 1] = (value >>> 16) & 0xff;
+  view[offset + 2] = (value >>> 8) & 0xff;
+  view[offset + 3] = value & 0xff;
+}
+
+function readUint32BE(view, offset) {
+  return (
+    ((view[offset] << 24) |
+      (view[offset + 1] << 16) |
+      (view[offset + 2] << 8) |
+      view[offset + 3]) >>>
+    0
+  );
+}
+
+/** Compact binary attachment (no nested base64) so ~25MB PDFs fit Gmail's 25MB cap. */
+function encodeSdsbAttachment(payload, cipherBytes) {
+  const meta = {
+    version: 4,
+    type: "secure-doc-share",
+    kind: payload.kind,
+    mode: payload.mode,
+    keyScheme: payload.keyScheme || null,
+    expectedEmail: payload.expectedEmail || null,
+    recipientUuidHash: payload.recipientUuidHash,
+    actionId: payload.actionId || null,
+    filename: payload.filename,
+    mimeType: payload.mimeType || "application/json",
+    iv: payload.iv || null,
+    wrappedKey: payload.wrappedKey || null,
+  };
+  const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+  const out = new Uint8Array(4 + 1 + 4 + metaBytes.length + 4 + cipherBytes.length);
+  out[0] = 0x53; // S
+  out[1] = 0x44; // D
+  out[2] = 0x53; // S
+  out[3] = 0x42; // B
+  out[4] = 1; // format version
+  writeUint32BE(out, 5, metaBytes.length);
+  out.set(metaBytes, 9);
+  const cipherOffset = 9 + metaBytes.length;
+  writeUint32BE(out, cipherOffset, cipherBytes.length);
+  out.set(cipherBytes, cipherOffset + 4);
+  return out;
+}
+
+function parseSdsbAttachment(bytes) {
+  if (
+    bytes.length < 13 ||
+    bytes[0] !== 0x53 ||
+    bytes[1] !== 0x44 ||
+    bytes[2] !== 0x53 ||
+    bytes[3] !== 0x42
+  ) {
+    return null;
+  }
+  const formatVersion = bytes[4];
+  if (formatVersion !== 1) {
+    throw new Error("Unsupported SecureDocShare attachment format version.");
+  }
+  const metaLen = readUint32BE(bytes, 5);
+  const metaStart = 9;
+  const metaEnd = metaStart + metaLen;
+  if (metaEnd + 4 > bytes.length) {
+    throw new Error("Corrupt SecureDocShare attachment (metadata).");
+  }
+  let meta;
+  try {
+    meta = JSON.parse(new TextDecoder().decode(bytes.subarray(metaStart, metaEnd)));
+  } catch {
+    throw new Error("Corrupt SecureDocShare attachment metadata.");
+  }
+  const cipherLen = readUint32BE(bytes, metaEnd);
+  const cipherStart = metaEnd + 4;
+  const cipherEnd = cipherStart + cipherLen;
+  if (cipherEnd > bytes.length) {
+    throw new Error("Corrupt SecureDocShare attachment (ciphertext).");
+  }
+  const cipherBytes = bytes.subarray(cipherStart, cipherEnd);
+  if (meta?.type !== "secure-doc-share" || !meta?.recipientUuidHash) {
+    throw new Error("This is not a SecureDocShare encrypted package.");
+  }
+  return {
+    ...meta,
+    version: meta.version || 4,
+    ciphertext: bytesToBase64(cipherBytes),
+  };
+}
+
+/**
+ * Parse uploaded attachment bytes (binary SDSB or legacy JSON).
+ */
+export function parseEncryptedPackageFromBytes(bytes) {
+  const view =
+    bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  if (!view.length) {
+    throw new Error("Encrypted package is empty.");
+  }
+
+  const sdsb = parseSdsbAttachment(view);
+  if (sdsb) return sdsb;
+
+  // Legacy JSON / sds. text packages
+  return parseEncryptedPackage(new TextDecoder().decode(view));
 }
 
 async function sha256Hex(value) {
@@ -401,12 +510,28 @@ export async function buildEncryptedPackage({
   };
 
   const ext = kind === "file" ? "securepdf" : "securemsg";
-  return {
+  const result = {
     fileName: `${encryptedName}.${ext}`,
     text: JSON.stringify(payload, null, 2),
     base64: stringToBase64(JSON.stringify(payload)),
     cipherText: toCipherText(payload),
+    attachmentBytes: null,
   };
+
+  // File attachments: binary package (raw ciphertext) so 25MB PDFs fit Gmail's 25MB limit.
+  // Message packages stay small JSON/base64.
+  if (kind === "file" && ciphertext) {
+    try {
+      const cipherBytes = base64ToBytes(ciphertext);
+      result.attachmentBytes = encodeSdsbAttachment(payload, cipherBytes);
+      // Prefer binary for Gmail; keep base64 only as legacy fallback for tiny files.
+      result.base64 = null;
+    } catch {
+      // Keep JSON base64 fallback if decode fails.
+    }
+  }
+
+  return result;
 }
 
 /**
