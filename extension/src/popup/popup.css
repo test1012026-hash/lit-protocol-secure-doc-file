@@ -116,6 +116,162 @@ textarea {
   cursor: not-allowed;
 }
 
+.recipient-suggest {
+  position: relative;
+  margin-bottom: 10px;
+}
+
+.recipient-chip-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  width: 100%;
+  padding: 8px 10px;
+  color: var(--text);
+  background: rgba(8, 18, 24, 0.45);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: text;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background 160ms ease;
+}
+
+.recipient-chip-field:hover {
+  border-color: rgba(43, 179, 160, 0.45);
+  background: rgba(8, 18, 24, 0.55);
+}
+
+.recipient-chip-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.recipient-chip-field.is-disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.recipient-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  background: rgba(43, 179, 160, 0.18);
+  border: 1px solid rgba(43, 179, 160, 0.35);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.recipient-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.recipient-chip-remove {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.recipient-chip-remove:hover {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.recipient-chip-input {
+  flex: 1 1 120px;
+  min-width: 120px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  padding: 4px 2px;
+  font: inherit;
+}
+
+.recipient-chip-input::placeholder {
+  color: #7f96a0;
+}
+
+.recipient-suggest-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #7f96a0;
+}
+
+.recipient-suggest-list {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  max-height: 220px;
+  overflow: auto;
+  background: #0f1c24;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.recipient-suggest-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.recipient-suggest-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.recipient-suggest-item:hover,
+.recipient-suggest-item:focus,
+.recipient-suggest-item.is-active {
+  background: rgba(43, 179, 160, 0.16);
+  outline: none;
+}
+
+.recipient-suggest-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.recipient-suggest-email {
+  font-size: 12px;
+  color: #7f96a0;
+}
+
 .btn {
   width: 100%;
   margin-bottom: 8px;
@@ -202,6 +358,7 @@ textarea {
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -385,4 +542,124 @@ textarea {
   75% {
     transform: translateX(3px);
   }
+}
+
+.mailbox-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+
+.mailbox-count {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mailbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 280px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(8, 18, 24, 0.35);
+}
+
+.mailbox-item {
+  display: block;
+  padding: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  min-width: 0;
+}
+
+.mailbox-item:last-child {
+  border-bottom: none;
+}
+
+.mailbox-item-main {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.mailbox-from-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mailbox-from {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mailbox-subject {
+  margin-top: 2px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.mailbox-secure-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #9fe3d7;
+  background: var(--accent-soft);
+  vertical-align: middle;
+}
+
+.mailbox-snippet {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.mailbox-date {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.mailbox-decrypt {
+  flex: 0 0 auto;
+  width: auto !important;
+  margin: 0 !important;
+  padding: 6px 10px !important;
+  font-size: 11px !important;
+  white-space: nowrap;
+}
+
+.mailbox-decrypt:disabled {
+  opacity: 0.45;
+}
+
+.mailbox-loading-more {
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 12px 10px;
 }

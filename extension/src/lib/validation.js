@@ -40,7 +40,10 @@ export function isEmptyRichText(html) {
 
 export const sendFileFormSchema = z
   .object({
-    recipientEmail: emailSchema,
+    recipientEmails: z
+      .array(emailSchema)
+      .min(1, "Add at least one recipient email")
+      .max(20, "You can send to at most 20 recipients at once"),
     subject: z.string().trim().max(200).optional().default(""),
     message: z.string().max(50000).optional().default(""),
     file: z.any().optional().nullable(),

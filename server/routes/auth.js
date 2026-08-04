@@ -17,6 +17,13 @@ const {
   verifyGoogleIdToken,
   getGmailAccessTokenFromRefresh,
 } = require("../lib/gmailAuth");
+const {
+  ensureUserSubscription,
+  isSubscriptionActive,
+  subscriptionPayload,
+  subscriptionBlockedError,
+  trialExpiresFrom,
+} = require("../lib/subscription");
 const authMiddleware = require("../middleware/auth");
 const { validateBody, validateQuery } = require("../middleware/validate");
 const {
@@ -57,7 +64,17 @@ function userPayload(user) {
     hasPassword: Boolean(user.passwordHash),
     gmailConnected: Boolean(user.gmailRefreshToken),
     hasPublicKey: Boolean(user.publicKeySpki && user.privateKeyEnc),
+    ...subscriptionPayload(user),
   };
+}
+
+async function finalizeClaimedUser(user) {
+  if (!user.subscriptionExpiresAt) {
+    user.subscriptionExpiresAt = trialExpiresFrom(new Date());
+  }
+  await user.save();
+  await ensureUserSubscription(user);
+  return user;
 }
 
 function generateResetToken() {
@@ -90,7 +107,7 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
         claimed: true,
       });
     }
-    await user.save();
+    await finalizeClaimedUser(user);
 
     res.json(userPayload(user));
   } catch (err) {
@@ -112,6 +129,7 @@ router.post("/login", validateBody(loginSchema), async (req, res) => {
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
 
+    await ensureUserSubscription(user);
     res.json(userPayload(user));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -140,7 +158,7 @@ async function upsertGoogleUser(payload, gmailRefreshToken) {
   if (gmailRefreshToken) {
     user.gmailRefreshToken = gmailRefreshToken;
   }
-  await user.save();
+  await finalizeClaimedUser(user);
   return user;
 }
 
@@ -151,9 +169,14 @@ router.post(
     try {
       const { idToken } = req.body;
 
+      const audiences = [
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_GMAIL_CLIENT_ID,
+      ].filter(Boolean);
+
       const ticket = await googleClient.verifyIdToken({
         idToken,
-        audience: process.env.GOOGLE_CLIENT_ID,
+        audience: audiences.length === 1 ? audiences[0] : audiences,
       });
       const payload = ticket.getPayload();
       const user = await upsertGoogleUser(payload);
@@ -276,6 +299,7 @@ router.post(
       await user.save();
       await PasswordReset.deleteOne({ email });
 
+      await ensureUserSubscription(user);
       res.json(userPayload(user));
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -415,6 +439,7 @@ router.post(
       res.json({
         accessToken: tokens.access_token,
         gmailConnected: Boolean(user.gmailRefreshToken),
+        scope: tokens.scope || "",
       });
     } catch (err) {
       const msg = err.message || String(err);
@@ -422,6 +447,18 @@ router.post(
     }
   },
 );
+
+router.post("/gmail/disconnect", authMiddleware, async (req, res) => {
+  try {
+    await User.updateOne(
+      { uuid: req.user.uuid },
+      { $unset: { gmailRefreshToken: 1 } },
+    );
+    res.json({ gmailConnected: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.get("/gmail/status", authMiddleware, async (req, res) => {
   try {
@@ -433,11 +470,26 @@ router.get("/gmail/status", authMiddleware, async (req, res) => {
   }
 });
 
+router.get("/subscription", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    await ensureUserSubscription(user);
+    res.json(subscriptionPayload(user));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /** Short-lived access token so the extension can send large attachments via Gmail (bypasses Vercel 4.5MB body limit). */
 router.post("/gmail/send-token", authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
     if (!user) return res.status(404).json({ error: "User not found" });
+    await ensureUserSubscription(user);
+    if (!isSubscriptionActive(user)) {
+      return res.status(403).json(subscriptionBlockedError());
+    }
     if (!user.gmailRefreshToken) {
       return res.status(403).json({
         error: "Allow Gmail access once to send from your address.",
@@ -463,6 +515,45 @@ router.post("/gmail/send-token", authMiddleware, async (req, res) => {
         );
         return res.status(403).json({
           error: "Gmail access expired. Allow Gmail again to continue sending.",
+          code: "GMAIL_NOT_CONNECTED",
+        });
+      }
+      throw tokenErr;
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Access token for reading mailbox (Receive). No subscription required. */
+router.post("/gmail/mailbox-token", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (!user.gmailRefreshToken) {
+      return res.status(403).json({
+        error: "Allow Gmail access once to read your mailbox.",
+        code: "GMAIL_NOT_CONNECTED",
+      });
+    }
+
+    try {
+      const accessToken = await getGmailAccessTokenFromRefresh(
+        user.gmailRefreshToken,
+      );
+      res.json({
+        accessToken,
+        email: user.email,
+      });
+    } catch (tokenErr) {
+      const msg = tokenErr.message || String(tokenErr);
+      if (/invalid_grant|token has been expired|revoked/i.test(msg)) {
+        await User.updateOne(
+          { uuid: req.user.uuid },
+          { $unset: { gmailRefreshToken: 1 } },
+        );
+        return res.status(403).json({
+          error: "Gmail access expired. Allow Gmail again to read your mailbox.",
           code: "GMAIL_NOT_CONNECTED",
         });
       }

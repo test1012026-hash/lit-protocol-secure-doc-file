@@ -30,6 +30,7 @@
     "https://oauth2.googleapis.com/*",
     "https://www.googleapis.com/*",
     "https://gmail.googleapis.com/*",
+    "https://people.googleapis.com/*",
     "https://api.devnet.solana.com/*",
     "https://*.solana.com/*",
     "https://*.g.alchemy.com/*",
@@ -56,6 +57,11 @@
         "https://*.vercel.app/*"
       ],
       "js": ["src/openExtensionBridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["src/gmailDecryptInject.js"],
       "run_at": "document_idle"
     }
   ],

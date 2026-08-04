@@ -21,6 +21,7 @@ const userSchema = new mongoose.Schema({
   gmailConnectState: { type: String, default: null },
   gmailConnectStateExpires: { type: Date, default: null },
   claimed: { type: Boolean, default: false },
+  subscriptionExpiresAt: { type: Date, default: null },
 
   // RSA-OAEP public key (SPKI base64) — used by senders to encrypt every mail.
   publicKeySpki: { type: String, default: null },

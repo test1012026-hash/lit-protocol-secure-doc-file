@@ -2,36 +2,74 @@ import {
   GOOGLE_CLIENT_ID,
   GOOGLE_GMAIL_CLIENT_ID,
   EXTENSION_ID,
+  FIREFOX_EXTENSION_ID,
   GOOGLE_REDIRECT_URI,
 } from "./config";
 import { api } from "./api";
 import { saveAuth } from "./authStorage";
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const CONTACTS_READONLY_SCOPE =
+  "https://www.googleapis.com/auth/contacts.readonly";
+const OTHER_CONTACTS_READONLY_SCOPE =
+  "https://www.googleapis.com/auth/contacts.other.readonly";
+
+/** Gmail send/read + People API contacts (emails for autocomplete). */
+export const GMAIL_OAUTH_SCOPES = [
+  GMAIL_SEND_SCOPE,
+  GMAIL_READONLY_SCOPE,
+  CONTACTS_READONLY_SCOPE,
+  OTHER_CONTACTS_READONLY_SCOPE,
+].join(" ");
+
+export function isFirefoxExtension() {
+  const id = String(chrome.runtime?.id || "");
+  return id.includes("@") || id === FIREFOX_EXTENSION_ID;
+}
 
 export function getGoogleRedirectUri() {
+  try {
+    if (typeof chrome?.identity?.getRedirectURL === "function") {
+      const url = chrome.identity.getRedirectURL();
+      if (url) return url.replace(/\/$/, "");
+    }
+  } catch {
+    // fall through
+  }
+  if (isFirefoxExtension()) {
+    return `https://${String(chrome.runtime.id).replace(
+      /[^a-z0-9]/gi,
+      "-",
+    )}.extensions.allizom.org`;
+  }
   return GOOGLE_REDIRECT_URI;
 }
 
 export function getGoogleOAuthSetup() {
   const runtimeId = chrome.runtime.id;
   const redirectUri = getGoogleRedirectUri();
+  const allowedIds = new Set(
+    [EXTENSION_ID, FIREFOX_EXTENSION_ID].filter(Boolean),
+  );
   return {
     runtimeId,
     redirectUri,
     clientId: GOOGLE_CLIENT_ID,
     gmailClientId: GOOGLE_GMAIL_CLIENT_ID,
-    idMatches: runtimeId === EXTENSION_ID,
+    idMatches: allowedIds.has(runtimeId),
+    isFirefox: isFirefoxExtension(),
   };
 }
 
 function assertExtensionId() {
-  const { runtimeId, idMatches } = getGoogleOAuthSetup();
+  const { runtimeId, idMatches, redirectUri } = getGoogleOAuthSetup();
   if (!idMatches) {
     throw new Error(
-      `Extension ID mismatch. Loaded as ${runtimeId}, expected ${EXTENSION_ID}. Rebuild and reload the extension.`,
+      `Extension ID mismatch. Loaded as ${runtimeId}, expected ${EXTENSION_ID} (Chrome) or ${FIREFOX_EXTENSION_ID} (Firefox). Rebuild with the matching build and reload.`,
     );
   }
+  return redirectUri;
 }
 
 function launchWebAuthFlow(authUrl) {
@@ -42,7 +80,8 @@ function launchWebAuthFlow(authUrl) {
         if (chrome.runtime.lastError || !redirectUrl) {
           reject(
             new Error(
-              chrome.runtime.lastError?.message || "Google authorization cancelled",
+              chrome.runtime.lastError?.message ||
+                "Google authorization cancelled",
             ),
           );
           return;
@@ -53,14 +92,17 @@ function launchWebAuthFlow(authUrl) {
   });
 }
 
-/** Login + Lit identity — extension client, id_token in redirect hash. */
+function getLoginClientId() {
+  return isFirefoxExtension() ? GOOGLE_GMAIL_CLIENT_ID : GOOGLE_CLIENT_ID;
+}
+
 export async function googleSignIn() {
-  assertExtensionId();
-  const { redirectUri } = getGoogleOAuthSetup();
+  const redirectUri = assertExtensionId();
+  const clientId = getLoginClientId();
   const nonce = crypto.randomUUID();
   const authUrl =
     "https://accounts.google.com/o/oauth2/v2/auth" +
-    `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}` +
+    `?client_id=${encodeURIComponent(clientId)}` +
     "&response_type=id_token" +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&scope=${encodeURIComponent("openid email profile")}` +
@@ -82,32 +124,114 @@ export async function googleSignIn() {
   } catch (err) {
     if (/redirect_uri_mismatch/i.test(err.message)) {
       throw new Error(
-        `${err.message}. In Google Cloud Console, open the Chrome extension OAuth client and ensure redirect URI: ${redirectUri}`,
+        `${err.message}. In Google Cloud Console (Web OAuth client), add authorized redirect URI: ${redirectUri}`,
       );
     }
     throw err;
   }
 }
 
-/**
- * Ask for Gmail once, store refresh token on server, then reuse silently.
- */
-export async function ensureGmailConnected(jwtToken, auth) {
-  const { data: status } = await api.gmailStatus(jwtToken);
-  if (status.gmailConnected) {
-    return true;
+export function scopeHasContacts(scopeStr) {
+  const s = String(scopeStr || "");
+  return (
+    s.includes("contacts.readonly") ||
+    s.includes("contacts.other.readonly") ||
+    s.includes("/auth/contacts")
+  );
+}
+
+export function scopeHasGmailReadonly(scopeStr) {
+  const s = String(scopeStr || "");
+  return s.includes("gmail.readonly") || s.includes("gmail.modify");
+}
+
+/** Read granted scopes for an access token. */
+export async function getAccessTokenScopes(accessToken) {
+  const res = await fetch(
+    `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(accessToken)}`,
+  );
+  if (!res.ok) return "";
+  const data = await res.json().catch(() => ({}));
+  return String(data.scope || "");
+}
+
+async function classifyPeopleProbe(accessToken) {
+  const res = await fetch(
+    "https://people.googleapis.com/v1/people/me/connections?personFields=emailAddresses&pageSize=1",
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (res.ok || res.status === 404) {
+    return { ok: true };
   }
 
-  assertExtensionId();
-  const { redirectUri } = getGoogleOAuthSetup();
+  const text = await res.text().catch(() => "");
+  let body = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = {};
+  }
+  const msg = String(body?.error?.message || text || `HTTP ${res.status}`);
+
+  if (/has not been used|is disabled|API has not been|SERVICE_DISABLED/i.test(msg)) {
+    return {
+      ok: false,
+      code: "PEOPLE_API_DISABLED",
+      message:
+        "People API is disabled for your Google Cloud project. Open Google Cloud Console → APIs & Services → Enable “People API”, then try again.",
+    };
+  }
+
+  if (
+    /insufficient|ACCESS_TOKEN_SCOPE|Request had insufficient authentication scopes/i.test(
+      msg,
+    ) ||
+    res.status === 401 ||
+    res.status === 403
+  ) {
+    return {
+      ok: false,
+      code: "CONTACTS_SCOPE_REQUIRED",
+      message:
+        "Google Contacts permission is missing. Click “Allow Google Contacts” and approve Contacts access.",
+    };
+  }
+
+  return { ok: false, code: "PEOPLE_API_ERROR", message: msg };
+}
+
+/**
+ * Connect Gmail + Contacts. Returns { accessToken, ... }.
+ * forceReconsent clears old refresh token so Google can issue Contacts scopes.
+ */
+export async function ensureGmailConnected(
+  jwtToken,
+  auth,
+  { forceReconsent = false } = {},
+) {
+  if (!forceReconsent) {
+    const { data: status } = await api.gmailStatus(jwtToken);
+    if (status.gmailConnected) {
+      return { accessToken: null, gmailConnected: true, reused: true };
+    }
+  } else {
+    try {
+      await api.gmailDisconnect(jwtToken);
+    } catch {
+      // continue
+    }
+  }
+
+  const redirectUri = assertExtensionId();
   const authUrl =
     "https://accounts.google.com/o/oauth2/v2/auth" +
     `?client_id=${encodeURIComponent(GOOGLE_GMAIL_CLIENT_ID)}` +
     "&response_type=code" +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&scope=${encodeURIComponent(GMAIL_SEND_SCOPE)}` +
+    `&scope=${encodeURIComponent(GMAIL_OAUTH_SCOPES)}` +
     "&access_type=offline" +
-    "&prompt=consent";
+    "&prompt=consent" +
+    "&include_granted_scopes=true";
 
   const redirectUrl = await launchWebAuthFlow(authUrl);
   const query = redirectUrl.split("?")[1]?.split("#")[0] || "";
@@ -117,14 +241,125 @@ export async function ensureGmailConnected(jwtToken, auth) {
     throw new Error(
       params.get("error_description") ||
         params.get("error") ||
-        "No authorization code returned for Gmail",
+        "No authorization code returned for Gmail/Contacts",
     );
   }
 
   const { data } = await api.exchangeGmailCode({ code, redirectUri }, jwtToken);
-  if (auth && data.gmailConnected) {
+  if (!data.accessToken) {
+    throw new Error("Google did not return an access token after consent.");
+  }
+  if (auth) {
     const updated = { ...auth, gmailConnected: true };
     await saveAuth(updated);
   }
-  return true;
+
+  const scope =
+    data.scope || (await getAccessTokenScopes(data.accessToken)) || "";
+
+  return {
+    accessToken: data.accessToken,
+    gmailConnected: true,
+    scope,
+    hasContactsScope: scopeHasContacts(scope),
+    reused: false,
+  };
+}
+
+/**
+ * Access token that can call People API. Forces Contacts consent when needed.
+ */
+export async function getPeopleAccessToken(jwtToken, auth) {
+  let accessToken = null;
+
+  try {
+    const { data } = await api.gmailSendToken(jwtToken);
+    accessToken = data.accessToken || null;
+  } catch {
+    accessToken = null;
+  }
+
+  if (accessToken) {
+    const probe = await classifyPeopleProbe(accessToken);
+    if (probe.ok) return accessToken;
+    if (probe.code === "PEOPLE_API_DISABLED") {
+      const err = new Error(probe.message);
+      err.code = probe.code;
+      throw err;
+    }
+  }
+
+  // Re-consent for Contacts (and Gmail).
+  const connected = await ensureGmailConnected(jwtToken, auth, {
+    forceReconsent: true,
+  });
+  accessToken = connected.accessToken;
+  if (!accessToken) {
+    const { data } = await api.gmailSendToken(jwtToken);
+    accessToken = data.accessToken;
+  }
+
+  const scope =
+    connected.scope || (await getAccessTokenScopes(accessToken)) || "";
+  if (!scopeHasContacts(scope)) {
+    const err = new Error(
+      "Contacts scope was not granted. On the Google consent screen, allow “See and download your contacts” (and Other contacts), then try again.",
+    );
+    err.code = "CONTACTS_SCOPE_REQUIRED";
+    throw err;
+  }
+
+  const probe = await classifyPeopleProbe(accessToken);
+  if (!probe.ok) {
+    const err = new Error(probe.message);
+    err.code = probe.code;
+    throw err;
+  }
+
+  return accessToken;
+}
+
+/**
+ * Access token that can read Gmail (list/open messages). Forces re-consent when
+ * gmail.readonly is missing from the stored refresh token.
+ */
+export async function getMailboxAccessToken(jwtToken, auth) {
+  let accessToken = null;
+
+  try {
+    const { data } = await api.gmailMailboxToken(jwtToken);
+    accessToken = data.accessToken || null;
+  } catch (err) {
+    if (err.response?.data?.code === "GMAIL_NOT_CONNECTED") {
+      accessToken = null;
+    } else {
+      accessToken = null;
+    }
+  }
+
+  if (accessToken) {
+    const scope = await getAccessTokenScopes(accessToken);
+    if (scopeHasGmailReadonly(scope)) return accessToken;
+  }
+
+  const connected = await ensureGmailConnected(jwtToken, auth, {
+    forceReconsent: true,
+  });
+  accessToken = connected.accessToken;
+  if (!accessToken) {
+    const { data } = await api.gmailMailboxToken(jwtToken);
+    accessToken = data.accessToken;
+  }
+
+  const scope =
+    connected.scope || (await getAccessTokenScopes(accessToken)) || "";
+  if (!scopeHasGmailReadonly(scope)) {
+    const err = new Error(
+      "Gmail read permission is missing. On the Google consent screen, allow “Read your email” / View your email messages, then try again.",
+    );
+    err.code = "GMAIL_READONLY_REQUIRED";
+    throw err;
+  }
+
+  return accessToken;
 }

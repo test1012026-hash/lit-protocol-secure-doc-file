@@ -13,6 +13,7 @@ import {
 import { ensureUserKeyPair } from "../lib/userKeys";
 import { DEMO_MODE } from "../lib/config";
 import { getLitActionId } from "../lib/lit";
+import { api } from "../lib/api";
 
 export default function App() {
   const [auth, setAuth] = useState(null);
@@ -61,20 +62,37 @@ export default function App() {
     setShowSetPassword(false);
   };
 
-  // Existing sessions: create/upload keys once if missing.
+  // Existing sessions: refresh subscription + create keys if missing.
   useEffect(() => {
-    if (!auth?.token || !DEMO_MODE) return;
+    if (!auth?.token) return;
     let cancelled = false;
     (async () => {
       try {
-        await ensureUserKeyPair(auth, getLitActionId);
+        const { data: sub } = await api.getSubscription(auth.token);
+        if (!cancelled) {
+          setAuth((prev) => {
+            if (!prev) return prev;
+            const next = { ...prev, ...sub };
+            saveAuth(next);
+            return next;
+          });
+        }
+      } catch (err) {
+        console.error("Subscription refresh failed:", err);
+      }
+      if (!DEMO_MODE) return;
+      try {
+        await ensureUserKeyPair(
+          { uuid: auth.uuid, token: auth.token },
+          getLitActionId,
+        );
         if (!cancelled && !auth.hasPublicKey) {
-          const next = {
-            ...auth,
-            hasPublicKey: true,
-          };
-          await saveAuth(next);
-          setAuth(next);
+          setAuth((prev) => {
+            if (!prev) return prev;
+            const next = { ...prev, hasPublicKey: true };
+            saveAuth(next);
+            return next;
+          });
         }
       } catch (err) {
         console.error("Key setup failed:", err);
@@ -131,8 +149,28 @@ export default function App() {
           </button>
         </div>
       )}
-      <div className="tabs">
-        <button
+      {auth.subscriptionActive === false && (
+        <div className="error-banner" style={{ marginBottom: 12 }}>
+          Your free {auth.subscriptionTrialDays || 90}-day trial ended
+          {auth.subscriptionExpiresAt
+            ? ` on ${new Date(auth.subscriptionExpiresAt).toLocaleDateString()}`
+            : ""}
+          . Subscribe to continue sending secure mail. Receiving still works.
+        </div>
+      )}
+      {auth.subscriptionActive !== false &&
+        typeof auth.subscriptionDaysLeft === "number" &&
+        auth.subscriptionDaysLeft <= 14 && (
+          <div className="notice" style={{ marginBottom: 12 }}>
+            Free trial: {auth.subscriptionDaysLeft} day
+            {auth.subscriptionDaysLeft === 1 ? "" : "s"} left
+            {auth.subscriptionExpiresAt
+              ? ` (ends ${new Date(auth.subscriptionExpiresAt).toLocaleDateString()})`
+              : ""}
+            .
+          </div>
+        )}
+      <div className="tabs">        <button
           className={`btn btn-tab ${tab === "send" ? "is-active" : ""}`}
           onClick={() => handleTabChange("send")}
           disabled={tab === "send"}

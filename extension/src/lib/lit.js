@@ -571,16 +571,79 @@ function packageFromCipherPayload(o) {
   };
 }
 
+function tryParseSdsBase64(b64) {
+  try {
+    const raw = new TextDecoder().decode(base64ToBytes(b64));
+    const obj = JSON.parse(raw);
+    return packageFromCipherPayload(obj) ? true : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract a clean sds.* token from email/HTML body.
+ * Stops at base64 padding (=) so trailing instructions like
+ * "Copy and paste the Message ciphertext..." are not glued on.
+ */
+export function extractSdsCiphertext(text) {
+  const raw = String(text || "");
+  const match = /sds\./i.exec(raw);
+  if (!match) return null;
+
+  let i = match.index + 4;
+  let b64 = "";
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (/[A-Za-z0-9+/_\-]/.test(ch)) {
+      b64 += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "=") {
+      b64 += "=";
+      i += 1;
+      while (i < raw.length && /\s/.test(raw[i])) i += 1;
+      if (raw[i] === "=") b64 += "=";
+      break;
+    }
+    break;
+  }
+
+  if (b64.length < 8) return null;
+
+  if (!tryParseSdsBase64(b64)) {
+    let candidate = b64;
+    while (candidate.length >= 8 && !tryParseSdsBase64(candidate)) {
+      candidate = candidate.slice(0, -1);
+    }
+    if (!tryParseSdsBase64(candidate)) return null;
+    b64 = candidate;
+  }
+
+  return `sds.${b64}`;
+}
+
 export function parseEncryptedPackage(packageText) {
   let trimmed = String(packageText || "").trim();
   if (!trimmed) {
     throw new Error("Encrypted package is empty.");
   }
 
-  // Email clients often insert spaces/newlines into long ciphertext.
-  const compact = trimmed.replace(/\s+/g, "");
-  if (compact.startsWith("sds.")) {
-    trimmed = compact;
+  // Prefer a clean sds token (strips trailing email instructions).
+  const extracted = extractSdsCiphertext(trimmed);
+  if (extracted) {
+    trimmed = extracted;
+  } else {
+    // Email clients often insert spaces/newlines into long ciphertext.
+    const compact = trimmed.replace(/\s+/g, "");
+    if (compact.startsWith("sds.")) {
+      trimmed = compact;
+    }
   }
 
   // Preferred: single ciphertext token (sds.<base64>)

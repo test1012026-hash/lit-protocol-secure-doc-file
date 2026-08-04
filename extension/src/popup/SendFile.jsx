@@ -18,9 +18,10 @@ import { ensureGmailConnected } from "../lib/googleAuth";
 import { provisionRecipientKeyPair } from "../lib/userKeys";
 import { sendEncryptedEmailViaGmail } from "../lib/gmailSend";
 import RichTextEditor from "./RichTextEditor";
+import RecipientEmailInput from "./RecipientEmailInput";
 
 export default function SendFile({ auth }) {
-  const [recipientEmail, setRecipientEmail] = useState("");
+  const [recipientEmails, setRecipientEmails] = useState([]);
   const [subject, setSubject] = useState("");
   const [message, setMessage] = useState("");
   const [file, setFile] = useState(null);
@@ -35,15 +36,150 @@ export default function SendFile({ auth }) {
     });
   }, []);
 
+  const sendToOneRecipient = async ({
+    recipientEmail,
+    values,
+    gmailAccessToken,
+    from,
+    appUrl,
+  }) => {
+    const { data: recipient } = await api.ensureRecipient(
+      recipientEmail,
+      auth.token,
+    );
+
+    let publicKeySpki = recipient.publicKeySpki || null;
+    if (DEMO_MODE && !publicKeySpki) {
+      const provisioned = await provisionRecipientKeyPair({
+        recipientEmail,
+        recipientUuid: recipient.recipientUuid,
+        token: auth.token,
+        getLitActionId,
+      });
+      publicKeySpki = provisioned.publicKeySpki;
+    }
+
+    if (DEMO_MODE && !publicKeySpki) {
+      throw new Error(
+        `Could not create a public key for ${recipientEmail}. Try again.`,
+      );
+    }
+
+    const hasMessage = !isEmptyRichText(values.message);
+    const hasFile = values.file instanceof File;
+
+    let messageCipherText = "";
+    let encryptedPackage = null;
+    let contentKind = "file";
+
+    if (hasMessage) {
+      const messageBytes = await buildContentPayloadBytes({
+        message: values.message,
+        file: null,
+      });
+      const encryptedMessage = await encryptForRecipient(
+        messageBytes,
+        recipient.recipientUuid,
+        { publicKeySpki },
+      );
+      const messagePackage = await buildEncryptedPackage({
+        ciphertext: encryptedMessage.ciphertext,
+        iv: encryptedMessage.iv,
+        wrappedKey: encryptedMessage.wrappedKey,
+        recipientUuidHash: encryptedMessage.recipientUuidHash,
+        actionId: encryptedMessage.actionId,
+        expectedEmail: recipientEmail,
+        filename: "message.json",
+        mimeType: "application/json",
+        mode: encryptedMessage.mode,
+        keyScheme: encryptedMessage.keyScheme,
+        kind: "message",
+      });
+      messageCipherText = messagePackage.cipherText;
+      if (!hasFile) {
+        encryptedPackage = messagePackage;
+        contentKind = "message";
+      }
+    }
+
+    if (hasFile) {
+      const fileBytes = await buildContentPayloadBytes({
+        message: "",
+        file: values.file,
+      });
+      const encryptedFile = await encryptForRecipient(
+        fileBytes,
+        recipient.recipientUuid,
+        { publicKeySpki },
+      );
+      const packageName =
+        values.file.name.replace(/\.[^./\\]+$/, "") || "document";
+      encryptedPackage = await buildEncryptedPackage({
+        ciphertext: encryptedFile.ciphertext,
+        iv: encryptedFile.iv,
+        wrappedKey: encryptedFile.wrappedKey,
+        recipientUuidHash: encryptedFile.recipientUuidHash,
+        actionId: encryptedFile.actionId,
+        expectedEmail: recipientEmail,
+        filename: `${packageName}.json`,
+        mimeType: "application/json",
+        mode: encryptedFile.mode,
+        keyScheme: encryptedFile.keyScheme,
+        kind: "file",
+      });
+      contentKind = hasMessage ? "bundle" : "file";
+    }
+
+    const subjectText =
+      values.subject || (hasFile ? values.file.name : "Secure message");
+
+    await api.sendFile(
+      {
+        recipientEmail,
+        recipientUuid: recipient.recipientUuid,
+        subject: subjectText,
+        message: messageCipherText,
+        filename: hasFile ? values.file.name : "message.txt",
+        contentKind,
+        clientSend: true,
+      },
+      auth.token,
+    );
+
+    await sendEncryptedEmailViaGmail({
+      accessToken: gmailAccessToken,
+      from,
+      to: recipientEmail,
+      subject: subjectText,
+      message: messageCipherText,
+      attachmentName: encryptedPackage?.fileName,
+      attachmentBytes: encryptedPackage?.attachmentBytes || null,
+      attachmentBase64: encryptedPackage?.attachmentBytes
+        ? null
+        : encryptedPackage?.base64 || null,
+      appUrl,
+    });
+  };
+
   const handleSend = async () => {
     try {
-      if (normalizeEmail(storedAuth?.email) === normalizeEmail(recipientEmail)) {
+      if (auth.subscriptionActive === false) {
+        setStatus(
+          "Error: Your free trial has ended. Subscribe to continue sending mail.",
+        );
+        return;
+      }
+
+      const self = normalizeEmail(storedAuth?.email || auth.email);
+      if (
+        recipientEmails.some((email) => normalizeEmail(email) === self)
+      ) {
         setStatus("Error: You cannot send to yourself");
         return;
       }
 
       const values = parseOrThrow(sendFileFormSchema, {
-        recipientEmail,
+        recipientEmails,
         subject,
         message,
         file,
@@ -55,146 +191,43 @@ export default function SendFile({ auth }) {
       }
       await ensureGmailConnected(auth.token, auth);
 
-      setStatus("Creating recipient UUID...");
-      const { data: recipient } = await api.ensureRecipient(
-        values.recipientEmail,
-        auth.token,
-      );
-
-      let publicKeySpki = recipient.publicKeySpki || null;
-      if (DEMO_MODE && !publicKeySpki) {
-        setStatus("Creating encryption keys for new recipient...");
-        const provisioned = await provisionRecipientKeyPair({
-          recipientEmail: values.recipientEmail,
-          recipientUuid: recipient.recipientUuid,
-          token: auth.token,
-          getLitActionId,
-        });
-        publicKeySpki = provisioned.publicKeySpki;
-      }
-
-      setStatus(
-        DEMO_MODE
-          ? "Fetching Lit action id + encrypting with recipient public key..."
-          : "Encrypting with UUID + Lit...",
-      );
-
-      const hasMessage = !isEmptyRichText(values.message);
-      const hasFile = values.file instanceof File;
-
-      if (DEMO_MODE && !publicKeySpki) {
-        throw new Error(
-          "Could not create a public key for this recipient. Try again.",
-        );
-      }
-
-      // Message → ciphertext for email Message body (paste-decrypt).
-      // File → separate encrypted attachment. Never bundle them together.
-      let messageCipherText = "";
-      let encryptedPackage = null;
-      let contentKind = "file";
-
-      if (hasMessage) {
-        const messageBytes = await buildContentPayloadBytes({
-          message: values.message,
-          file: null,
-        });
-        const encryptedMessage = await encryptForRecipient(
-          messageBytes,
-          recipient.recipientUuid,
-          { publicKeySpki },
-        );
-        const messagePackage = await buildEncryptedPackage({
-          ciphertext: encryptedMessage.ciphertext,
-          iv: encryptedMessage.iv,
-          wrappedKey: encryptedMessage.wrappedKey,
-          recipientUuidHash: encryptedMessage.recipientUuidHash,
-          actionId: encryptedMessage.actionId,
-          expectedEmail: values.recipientEmail,
-          filename: "message.json",
-          mimeType: "application/json",
-          mode: encryptedMessage.mode,
-          keyScheme: encryptedMessage.keyScheme,
-          kind: "message",
-        });
-        messageCipherText = messagePackage.cipherText;
-        // Message-only: attach encrypted message so recipient can also upload it.
-        if (!hasFile) {
-          encryptedPackage = messagePackage;
-          contentKind = "message";
-        }
-      }
-
-      if (hasFile) {
-        const fileBytes = await buildContentPayloadBytes({
-          message: "",
-          file: values.file,
-        });
-        const encryptedFile = await encryptForRecipient(
-          fileBytes,
-          recipient.recipientUuid,
-          { publicKeySpki },
-        );
-        const packageName =
-          values.file.name.replace(/\.[^./\\]+$/, "") || "document";
-        encryptedPackage = await buildEncryptedPackage({
-          ciphertext: encryptedFile.ciphertext,
-          iv: encryptedFile.iv,
-          wrappedKey: encryptedFile.wrappedKey,
-          recipientUuidHash: encryptedFile.recipientUuidHash,
-          actionId: encryptedFile.actionId,
-          expectedEmail: values.recipientEmail,
-          filename: `${packageName}.json`,
-          mimeType: "application/json",
-          mode: encryptedFile.mode,
-          keyScheme: encryptedFile.keyScheme,
-          kind: "file",
-        });
-        contentKind = hasMessage ? "bundle" : "file";
-      }
-
-      setStatus("Preparing send...");
-      const { data } = await api.sendFile(
-        {
-          recipientEmail: values.recipientEmail,
-          recipientUuid: recipient.recipientUuid,
-          subject:
-            values.subject ||
-            (hasFile ? values.file.name : "Secure message"),
-          message: messageCipherText,
-          filename: hasFile ? values.file.name : "message.txt",
-          contentKind,
-          clientSend: true,
-        },
-        auth.token,
-      );
-
-      setStatus("Sending via your Gmail...");
       const { data: tokenData } = await api.gmailSendToken(auth.token);
-      await sendEncryptedEmailViaGmail({
-        accessToken: tokenData.accessToken,
-        from: data.from || tokenData.from || auth.email,
-        to: values.recipientEmail,
-        subject: data.subject || values.subject || values.file?.name || "Secure message",
-        message: messageCipherText,
-        attachmentName: encryptedPackage?.fileName,
-        attachmentBytes: encryptedPackage?.attachmentBytes || null,
-        attachmentBase64: encryptedPackage?.attachmentBytes
-          ? null
-          : encryptedPackage?.base64 || null,
-        appUrl: data.appUrl || tokenData.appUrl,
-      });
+      const accessToken = tokenData.accessToken;
+      const from = tokenData.from || auth.email;
+      const appUrl = tokenData.appUrl;
 
-      setStatus(
-        `Sent from ${data.from || auth.email} to ${values.recipientEmail}.`,
-      );
-      setRecipientEmail("");
+      const sent = [];
+      for (let i = 0; i < values.recipientEmails.length; i++) {
+        const recipientEmail = values.recipientEmails[i];
+        setStatus(
+          `Encrypting & sending ${i + 1}/${values.recipientEmails.length}: ${recipientEmail}…`,
+        );
+        await sendToOneRecipient({
+          recipientEmail,
+          values,
+          gmailAccessToken: accessToken,
+          from,
+          appUrl,
+        });
+        sent.push(recipientEmail);
+      }
+
+      setStatus(`Sent from ${from} to ${sent.join(", ")}.`);
+      setRecipientEmails([]);
       setSubject("");
       setMessage("");
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
       const code = err.response?.data?.code || err.code;
+      if (code === "SUBSCRIPTION_EXPIRED") {
+        setStatus(
+          "Error: " +
+            (err.response?.data?.error ||
+              "Your free trial has ended. Subscribe to continue sending mail."),
+        );
+        return;
+      }
       if (code === "GMAIL_NOT_CONNECTED") {
         try {
           setStatus("Gmail access expired. Reconnecting...");
@@ -220,13 +253,15 @@ export default function SendFile({ auth }) {
   return (
     <div>
       <p className="hint">
-        Mail sends from your Google account ({auth.email})
+        Mail sends from your Google account ({auth.email}). Add one or more
+        recipients as chips.
       </p>
-      <input
-        className="field"
-        placeholder="Recipient email"
-        value={recipientEmail}
-        onChange={(e) => setRecipientEmail(e.target.value)}
+      <RecipientEmailInput
+        auth={auth}
+        value={recipientEmails}
+        onChange={setRecipientEmails}
+        disabled={loading}
+        placeholder="Type email, pick suggestion or Add…"
       />
       <input
         className="field"
@@ -247,8 +282,16 @@ export default function SendFile({ auth }) {
         accept="application/pdf,.pdf"
         onChange={(e) => setFile(e.target.files[0] || null)}
       />
-      <button className="btn btn-primary" onClick={handleSend} disabled={loading}>
-        {loading ? "Working..." : "Encrypt and send"}
+      <button
+        className="btn btn-primary"
+        onClick={handleSend}
+        disabled={loading || auth.subscriptionActive === false}
+      >
+        {loading
+          ? "Working..."
+          : auth.subscriptionActive === false
+            ? "Subscription required"
+            : "Encrypt and send"}
       </button>
       {status && (
         <p

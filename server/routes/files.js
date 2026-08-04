@@ -10,6 +10,11 @@ const {
 } = require("../validation/schemas");
 const { sendEncryptedFileEmail } = require("../lib/mail");
 const { normalizeEmail } = require("../lib/email");
+const {
+  ensureUserSubscription,
+  isSubscriptionActive,
+  subscriptionBlockedError,
+} = require("../lib/subscription");
 
 const router = express.Router();
 const DEMO_MODE = process.env.DEMO_MODE === "true";
@@ -191,6 +196,10 @@ router.post(
       const sender = await User.findOne({ uuid: req.user.uuid, claimed: true });
       if (!sender) {
         return res.status(401).json({ error: "Sender account not found" });
+      }
+      await ensureUserSubscription(sender);
+      if (!isSubscriptionActive(sender)) {
+        return res.status(403).json(subscriptionBlockedError());
       }
       if (!sender.gmailRefreshToken && !gmailAccessToken && !clientSend) {
         return res.status(403).json({
