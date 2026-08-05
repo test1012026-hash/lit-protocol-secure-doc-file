@@ -203,7 +203,10 @@ export async function provisionRecipientKeyPair({
 
 /**
  * Create RSA keys if missing. Private key wrapped with uuid + live list_actions id.
+ * Never regenerates or overwrites an existing public/private key pair.
  */
+const ensureKeyInflight = new Map();
+
 export async function ensureUserKeyPair(auth, getLitActionId) {
   if (!auth?.uuid || !auth?.token) {
     throw new Error("Login required to set up encryption keys.");
@@ -212,31 +215,59 @@ export async function ensureUserKeyPair(auth, getLitActionId) {
     throw new Error("getLitActionId is required.");
   }
 
-  const { data: existing } = await api.getMyKeys(auth.token);
-  if (hasCompleteKeyBundle(existing)) {
-    return {
-      publicKeySpki: existing.publicKeySpki,
-      created: false,
-    };
+  // Already known on this session — do not touch server keys.
+  if (auth.hasPublicKey) {
+    return { publicKeySpki: null, created: false, skipped: true };
   }
 
-  const actionId = await getLitActionId();
-  const pair = await generateUserKeyPair();
-  const publicKeySpki = await exportPublicKeySpkiBase64(pair.publicKey);
-  const pkcs8 = await exportPrivateKeyPkcs8Base64(pair.privateKey);
-  const wrapped = await wrapPrivateKeyPkcs8(pkcs8, auth.uuid, actionId);
+  const inflightKey = String(auth.uuid);
+  if (ensureKeyInflight.has(inflightKey)) {
+    return ensureKeyInflight.get(inflightKey);
+  }
 
-  await api.registerKeys(
-    {
-      publicKeySpki,
-      privateKeyEnc: wrapped.privateKeyEnc,
-      privateKeyIv: wrapped.privateKeyIv,
-      privateKeySalt: wrapped.privateKeySalt,
-    },
-    auth.token,
-  );
+  const work = (async () => {
+    const { data: existing } = await api.getMyKeys(auth.token);
+    if (hasCompleteKeyBundle(existing)) {
+      return {
+        publicKeySpki: existing.publicKeySpki,
+        created: false,
+      };
+    }
 
-  return { publicKeySpki, created: true };
+    const actionId = await getLitActionId();
+    const pair = await generateUserKeyPair();
+    const publicKeySpki = await exportPublicKeySpkiBase64(pair.publicKey);
+    const pkcs8 = await exportPrivateKeyPkcs8Base64(pair.privateKey);
+    const wrapped = await wrapPrivateKeyPkcs8(pkcs8, auth.uuid, actionId);
+
+    const { data: registered } = await api.registerKeys(
+      {
+        publicKeySpki,
+        privateKeyEnc: wrapped.privateKeyEnc,
+        privateKeyIv: wrapped.privateKeyIv,
+        privateKeySalt: wrapped.privateKeySalt,
+      },
+      auth.token,
+    );
+
+    // Server may have rejected overwrite if another request won the race.
+    if (registered?.alreadyExists) {
+      const { data: again } = await api.getMyKeys(auth.token);
+      return {
+        publicKeySpki: again.publicKeySpki || publicKeySpki,
+        created: false,
+      };
+    }
+
+    return { publicKeySpki, created: true };
+  })();
+
+  ensureKeyInflight.set(inflightKey, work);
+  try {
+    return await work;
+  } finally {
+    ensureKeyInflight.delete(inflightKey);
+  }
 }
 
 /**

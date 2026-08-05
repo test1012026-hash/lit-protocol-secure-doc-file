@@ -83,6 +83,74 @@ function isSecureAttachmentName(name) {
   );
 }
 
+function isReplyOrForwardMessage(headers) {
+  if (
+    headerValue(headers, "In-Reply-To") ||
+    headerValue(headers, "References")
+  ) {
+    return true;
+  }
+  const subject = headerValue(headers, "Subject") || "";
+  return /^(re|fw|fwd)\s*:/i.test(subject.trim());
+}
+
+/** Remove quoted reply/forward content so keyword matches aren't from the original mail. */
+function stripQuotedReplyContent(text, html) {
+  let plain = String(text || "");
+  let fromHtml = String(html || "");
+
+  fromHtml = fromHtml
+    .replace(/<blockquote[\s\S]*?<\/blockquote>/gi, " ")
+    .replace(/<div[^>]*class="[^"]*gmail_quote[^"]*"[\s\S]*$/gi, " ")
+    .replace(/<div[^>]*class="[^"]*gmail_extra[^"]*"[\s\S]*$/gi, " ")
+    .replace(/<div[^>]*class="[^"]*gmail_attr[^"]*"[\s\S]*$/gi, " ");
+
+  plain = plain
+    // "On Mon, ... wrote:" and everything after
+    .replace(/\nOn .+wrote:\s*[\s\S]*$/i, "\n")
+    // Outlook-style "-----Original Message-----"
+    .replace(/\n-+\s*Original Message\s*-+[\s\S]*$/i, "\n")
+    // Quoted lines
+    .replace(/^\s*>.*$/gm, "");
+
+  const htmlPlain = stripHtml(fromHtml);
+  return `${plain}\n${htmlPlain}`.replace(/\s+/g, " ").trim();
+}
+
+function isOriginalSecureDocShareMail({
+  headers,
+  bodyText,
+  bodyHtml,
+  attachments,
+}) {
+  const ownBody = stripQuotedReplyContent(bodyText, bodyHtml);
+  const secureAttachments = (attachments || []).filter((a) =>
+    isSecureAttachmentName(a.filename),
+  );
+  const ownCiphertext = extractSdsCiphertext(ownBody);
+
+  // Real SDS payload or secure file on this message itself.
+  if (ownCiphertext || secureAttachments.length > 0) {
+    // Still drop pure replies that only quote ciphertext with no attachment of their own
+    // if the sds token exists only because quote stripping failed — handled below.
+    if (!isReplyOrForwardMessage(headers)) return true;
+    // Replies: allow only if they include their own secure attachment,
+    // or a ciphertext that is clearly in the non-quoted body (ownCiphertext already from stripped body).
+    if (secureAttachments.length > 0) return true;
+    if (ownCiphertext && ownBody.length > 40) return true;
+    return false;
+  }
+
+  // Keyword-only match: never for replies/forwards.
+  if (isReplyOrForwardMessage(headers)) return false;
+
+  return (
+    /SecureDocShare/i.test(ownBody) ||
+    /ciphertext/i.test(ownBody) ||
+    /\bsds\./i.test(ownBody)
+  );
+}
+
 async function gmailFetch(accessToken, path) {
   const res = await fetch(`https://gmail.googleapis.com/gmail/v1/${path}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -98,7 +166,8 @@ async function gmailFetch(accessToken, path) {
   return res.json();
 }
 
-const SECURE_MAIL_QUERY = "ciphertext OR SecureDocShare OR sds.";
+const SECURE_MAIL_QUERY =
+  "(ciphertext OR SecureDocShare OR sds. OR filename:securemsg) -subject:re: -subject:fwd: -subject:fw:";
 
 export async function listMailboxMessages(
   accessToken,
@@ -116,7 +185,6 @@ export async function listMailboxMessages(
     `users/me/messages?${params.toString()}`,
   );
 
-
   const ids = (list.messages || []).map((m) => m.id);
   const messages = [];
 
@@ -130,23 +198,22 @@ export async function listMailboxMessages(
     const bodyText =
       parts.texts.join("\n\n") || stripHtml(parts.htmls.join("\n"));
     const bodyHtml = parts.htmls[0] || "";
-    const combinedContent = [
-      bodyText,
-      parts.htmls.join("\n"),
-      full.snippet || "",
-      headerValue(headers, "Subject") || "",
-      ...parts.attachments.map((a) => a.filename || ""),
-    ].join("\n");
 
-    const matchedContent =
-      /ciphertext/i.test(combinedContent) ||
-      /SecureDocShare/i.test(combinedContent) ||
-      /sds\./i.test(combinedContent) ||
-      parts.attachments.some((a) => isSecureAttachmentName(a.filename));
+    if (
+      !isOriginalSecureDocShareMail({
+        headers,
+        bodyText,
+        bodyHtml,
+        attachments: parts.attachments,
+      })
+    ) {
+      continue;
+    }
 
-    if (!matchedContent) continue;
-
-    const ciphertext = extractSdsCiphertext(combinedContent);
+    const ownBody = stripQuotedReplyContent(bodyText, bodyHtml);
+    const ciphertext =
+      extractSdsCiphertext(ownBody) ||
+      extractSdsCiphertext(`${bodyText}\n${parts.htmls.join("\n")}`);
     const secureAttachments = parts.attachments.filter((a) =>
       isSecureAttachmentName(a.filename),
     );
@@ -267,7 +334,9 @@ export async function downloadGmailAttachment(
 ) {
   const data = await gmailFetch(
     accessToken,
-    `users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    `users/me/messages/${encodeURIComponent(
+      messageId,
+    )}/attachments/${encodeURIComponent(attachmentId)}`,
   );
   return decodeBase64UrlBytes(data.data);
 }

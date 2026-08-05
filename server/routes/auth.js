@@ -1,7 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const User = require("../models/User");
 const PasswordReset = require("../models/PasswordReset");
@@ -24,6 +23,11 @@ const {
   subscriptionBlockedError,
   trialExpiresFrom,
 } = require("../lib/subscription");
+const {
+  issueAuthTokens,
+  hashToken,
+  verifyRefreshToken,
+} = require("../lib/tokens");
 const authMiddleware = require("../middleware/auth");
 const { validateBody, validateQuery } = require("../middleware/validate");
 const {
@@ -33,6 +37,7 @@ const {
   passwordResetRequestSchema,
   passwordResetCompleteSchema,
   passwordResetVerifySchema,
+  refreshTokenSchema,
   gmailAccessTokenSchema,
   registerPublicKeySchema,
 } = require("../validation/schemas");
@@ -48,22 +53,26 @@ function appUrl() {
   ).replace(/\/$/, "");
 }
 
-function issueToken(user) {
-  return jwt.sign(
-    { uuid: user.uuid, email: user.email },
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" },
-  );
+async function attachAuthTokens(user) {
+  const issued = issueAuthTokens(user);
+  user.refreshTokenHash = issued.refreshTokenHash;
+  await user.save();
+  return {
+    token: issued.token,
+    refreshToken: issued.refreshToken,
+  };
 }
 
-function userPayload(user) {
+function userPayload(user, tokens) {
   return {
-    token: issueToken(user),
+    token: tokens.token,
+    refreshToken: tokens.refreshToken,
     uuid: user.uuid,
     email: user.email,
     hasPassword: Boolean(user.passwordHash),
     gmailConnected: Boolean(user.gmailRefreshToken),
     hasPublicKey: Boolean(user.publicKeySpki && user.privateKeyEnc),
+    termsAndConditions: Boolean(user.termsAndConditions),
     ...subscriptionPayload(user),
   };
 }
@@ -100,16 +109,19 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
     if (user) {
       user.passwordHash = passwordHash;
       user.claimed = true;
+      user.termsAndConditions = true;
     } else {
       user = new User({
         email,
         passwordHash,
         claimed: true,
+        termsAndConditions: true,
       });
     }
     await finalizeClaimedUser(user);
 
-    res.json(userPayload(user));
+    const tokens = await attachAuthTokens(user);
+    res.json(userPayload(user, tokens));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -130,13 +142,18 @@ router.post("/login", validateBody(loginSchema), async (req, res) => {
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
 
     await ensureUserSubscription(user);
-    res.json(userPayload(user));
+    const tokens = await attachAuthTokens(user);
+    res.json(userPayload(user, tokens));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-async function upsertGoogleUser(payload, gmailRefreshToken) {
+async function upsertGoogleUser(
+  payload,
+  gmailRefreshToken,
+  { acceptTerms = false, intent = "login" } = {},
+) {
   const email = normalizeEmail(payload.email);
 
   let user = await User.findOne({ email });
@@ -149,11 +166,39 @@ async function upsertGoogleUser(payload, gmailRefreshToken) {
       if (user) user.email = email;
     }
   }
+
+  const isNewClaim = !user || !user.claimed;
+
+  // Google Log in: existing claimed accounts only — never auto-create.
+  if (intent !== "signup" && isNewClaim) {
+    const err = new Error(
+      "You are not able to log in. Please sign up first.",
+    );
+    err.status = 404;
+    err.code = "ACCOUNT_NOT_FOUND";
+    throw err;
+  }
+
+  if (isNewClaim && !acceptTerms) {
+    const err = new Error(
+      "You must accept the Terms & Conditions to create an account",
+    );
+    err.status = 400;
+    err.code = "TERMS_REQUIRED";
+    throw err;
+  }
+
   if (!user) {
-    user = new User({ email, googleId: payload.sub, claimed: true });
+    user = new User({
+      email,
+      googleId: payload.sub,
+      claimed: true,
+      termsAndConditions: Boolean(acceptTerms),
+    });
   } else {
     user.googleId = payload.sub;
     user.claimed = true;
+    if (acceptTerms) user.termsAndConditions = true;
   }
   if (gmailRefreshToken) {
     user.gmailRefreshToken = gmailRefreshToken;
@@ -167,7 +212,36 @@ router.post(
   validateBody(googleLoginSchema),
   async (req, res) => {
     try {
-      const { idToken } = req.body;
+      let idToken = req.body.idToken || null;
+      let gmailRefreshToken = null;
+      let accessToken = null;
+      let scope = "";
+
+      // Full Google login (code): identity + Gmail/Contacts/mailbox in one consent.
+      if (req.body.code) {
+        const tokens = await exchangeCodeForTokens(
+          req.body.code,
+          req.body.redirectUri,
+        );
+        idToken = tokens.id_token || null;
+        gmailRefreshToken = tokens.refresh_token || null;
+        accessToken = tokens.access_token || null;
+        scope = tokens.scope || "";
+
+        if (!idToken) {
+          return res.status(401).json({
+            error:
+              "Google did not return an id_token. Approve Sign-in + Gmail/Contacts access and try again.",
+          });
+        }
+        if (!gmailRefreshToken) {
+          return res.status(401).json({
+            error:
+              "Google did not return offline access. Approve all requested permissions (prompt again if needed).",
+            code: "GMAIL_CONSENT_REQUIRED",
+          });
+        }
+      }
 
       const audiences = [
         process.env.GOOGLE_CLIENT_ID,
@@ -179,15 +253,37 @@ router.post(
         audience: audiences.length === 1 ? audiences[0] : audiences,
       });
       const payload = ticket.getPayload();
-      const user = await upsertGoogleUser(payload);
+      const user = await upsertGoogleUser(payload, gmailRefreshToken, {
+        acceptTerms: Boolean(req.body.acceptTerms),
+        intent: req.body.intent === "signup" ? "signup" : "login",
+      });
 
+      const tokens = await attachAuthTokens(user);
       res.json({
-        ...userPayload(user),
+        ...userPayload(user, tokens),
         googleIdToken: idToken,
+        accessToken,
+        scope,
       });
     } catch (err) {
       const msg = err.message || String(err);
-      res.status(401).json({ error: "Google verification failed: " + msg });
+      const status =
+        err.status ||
+        (err.code === "TERMS_REQUIRED"
+          ? 400
+          : err.code === "ACCOUNT_NOT_FOUND"
+            ? 404
+            : 401);
+      res.status(status).json({
+        error:
+          err.code === "TERMS_REQUIRED" ||
+          err.code === "ACCOUNT_NOT_FOUND" ||
+          err.status === 400 ||
+          err.status === 404
+            ? msg
+            : "Google verification failed: " + msg,
+        code: err.code || undefined,
+      });
     }
   },
 );
@@ -300,12 +396,69 @@ router.post(
       await PasswordReset.deleteOne({ email });
 
       await ensureUserSubscription(user);
-      res.json(userPayload(user));
+      const tokens = await attachAuthTokens(user);
+      res.json(userPayload(user, tokens));
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
   },
 );
+
+/** Exchange a valid refresh token for a new access + refresh pair. */
+router.post("/refresh", validateBody(refreshTokenSchema), async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    let payload;
+    try {
+      payload = verifyRefreshToken(refreshToken);
+    } catch (err) {
+      if (err.name === "TokenExpiredError") {
+        return res.status(401).json({
+          error: "Refresh token expired. Please log in again.",
+          code: "REFRESH_EXPIRED",
+        });
+      }
+      return res.status(401).json({
+        error: "Invalid refresh token. Please log in again.",
+        code: "REFRESH_INVALID",
+      });
+    }
+
+    const user = await User.findOne({ uuid: payload.uuid, claimed: true });
+    if (!user) {
+      return res.status(401).json({
+        error: "Account not found. Please log in again.",
+        code: "REFRESH_INVALID",
+      });
+    }
+
+    const incomingHash = hashToken(refreshToken);
+    if (!user.refreshTokenHash || user.refreshTokenHash !== incomingHash) {
+      return res.status(401).json({
+        error: "Refresh token revoked. Please log in again.",
+        code: "REFRESH_REVOKED",
+      });
+    }
+
+    await ensureUserSubscription(user);
+    const tokens = await attachAuthTokens(user);
+    res.json(userPayload(user, tokens));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/logout", authMiddleware, async (req, res) => {
+  try {
+    await User.updateOne(
+      { uuid: req.user.uuid },
+      { $unset: { refreshTokenHash: 1 } },
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.post(
   "/keys",
@@ -315,6 +468,21 @@ router.post(
     try {
       const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
       if (!user) return res.status(404).json({ error: "User not found" });
+
+      if (
+        user.publicKeySpki &&
+        user.privateKeyEnc &&
+        user.privateKeyIv &&
+        user.privateKeySalt
+      ) {
+        return res.json({
+          ok: true,
+          hasPublicKey: true,
+          alreadyExists: true,
+          uuid: user.uuid,
+          email: user.email,
+        });
+      }
 
       const {
         publicKeySpki,
@@ -337,6 +505,7 @@ router.post(
       res.json({
         ok: true,
         hasPublicKey: true,
+        alreadyExists: false,
         uuid: user.uuid,
         email: user.email,
       });

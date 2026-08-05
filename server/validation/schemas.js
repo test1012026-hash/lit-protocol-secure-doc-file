@@ -17,6 +17,11 @@ const uuidSchema = z.string().uuid("Invalid UUID");
 const signupSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
+  acceptTerms: z
+    .boolean()
+    .refine((value) => value === true, {
+      message: "You must accept the Terms & Conditions to sign up",
+    }),
 });
 
 const loginSchema = z.object({
@@ -24,9 +29,33 @@ const loginSchema = z.object({
   password: z.string().min(1, "Password is required"),
 });
 
-const googleLoginSchema = z.object({
-  idToken: z.string().min(20, "Google idToken is required"),
-});
+const googleLoginSchema = z
+  .object({
+    idToken: z.string().min(20).optional(),
+    code: z.string().min(10).optional(),
+    redirectUri: z.string().min(8, "redirectUri is required").optional(),
+    acceptTerms: z.boolean().optional().default(false),
+    intent: z.enum(["login", "signup"]).optional().default("login"),
+  })
+  .superRefine((value, ctx) => {
+    if (value.code) {
+      if (!value.redirectUri) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "redirectUri is required with Google auth code",
+          path: ["redirectUri"],
+        });
+      }
+      return;
+    }
+    if (!value.idToken) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Google idToken or auth code is required",
+        path: ["idToken"],
+      });
+    }
+  });
 
 const passwordResetRequestSchema = z.object({
   email: emailSchema,
@@ -41,6 +70,10 @@ const passwordResetCompleteSchema = z.object({
 const passwordResetVerifySchema = z.object({
   email: emailSchema,
   token: z.string().min(20, "Reset token is required"),
+});
+
+const refreshTokenSchema = z.object({
+  refreshToken: z.string().min(20, "Refresh token is required"),
 });
 
 const ensureRecipientSchema = z.object({
@@ -113,6 +146,7 @@ module.exports = {
   passwordResetRequestSchema,
   passwordResetCompleteSchema,
   passwordResetVerifySchema,
+  refreshTokenSchema,
   ensureRecipientSchema,
   sendFileSchema,
   gmailAccessTokenSchema,

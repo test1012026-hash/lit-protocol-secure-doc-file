@@ -23,6 +23,17 @@ export const GMAIL_OAUTH_SCOPES = [
   OTHER_CONTACTS_READONLY_SCOPE,
 ].join(" ");
 
+/** One-time Google login: identity + all Gmail/Contacts scopes. */
+export const GOOGLE_FULL_LOGIN_SCOPES = [
+  "openid",
+  "email",
+  "profile",
+  GMAIL_SEND_SCOPE,
+  GMAIL_READONLY_SCOPE,
+  CONTACTS_READONLY_SCOPE,
+  OTHER_CONTACTS_READONLY_SCOPE,
+].join(" ");
+
 export function isFirefoxExtension() {
   const id = String(chrome.runtime?.id || "");
   return id.includes("@") || id === FIREFOX_EXTENSION_ID;
@@ -121,6 +132,45 @@ export async function googleSignIn() {
       );
     }
     return idToken;
+  } catch (err) {
+    if (/redirect_uri_mismatch/i.test(err.message)) {
+      throw new Error(
+        `${err.message}. In Google Cloud Console (Web OAuth client), add authorized redirect URI: ${redirectUri}`,
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Google signup/login with all app scopes in one consent
+ * (identity + Gmail send/read + Contacts). Returns auth code for the server.
+ */
+export async function googleSignInWithFullAccess() {
+  const redirectUri = assertExtensionId();
+  const authUrl =
+    "https://accounts.google.com/o/oauth2/v2/auth" +
+    `?client_id=${encodeURIComponent(GOOGLE_GMAIL_CLIENT_ID)}` +
+    "&response_type=code" +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${encodeURIComponent(GOOGLE_FULL_LOGIN_SCOPES)}` +
+    "&access_type=offline" +
+    "&prompt=consent" +
+    "&include_granted_scopes=true";
+
+  try {
+    const redirectUrl = await launchWebAuthFlow(authUrl);
+    const query = redirectUrl.split("?")[1]?.split("#")[0] || "";
+    const params = new URLSearchParams(query);
+    const code = params.get("code");
+    if (!code) {
+      throw new Error(
+        params.get("error_description") ||
+          params.get("error") ||
+          "No authorization code returned from Google",
+      );
+    }
+    return { code, redirectUri };
   } catch (err) {
     if (/redirect_uri_mismatch/i.test(err.message)) {
       throw new Error(
@@ -250,7 +300,12 @@ export async function ensureGmailConnected(
     throw new Error("Google did not return an access token after consent.");
   }
   if (auth) {
-    const updated = { ...auth, gmailConnected: true };
+    const updated = {
+      ...auth,
+      gmailConnected: true,
+    };
+    delete updated.accessToken;
+    delete updated.scope;
     await saveAuth(updated);
   }
 

@@ -1,6 +1,9 @@
 import React, { useState } from "react";
 import { api } from "../lib/api";
-import { getGoogleOAuthSetup, googleSignIn } from "../lib/googleAuth";
+import {
+  getGoogleOAuthSetup,
+  googleSignInWithFullAccess,
+} from "../lib/googleAuth";
 import { loginSchema, parseOrThrow, signupSchema } from "../lib/validation";
 import ResetPassword from "./ResetPassword";
 
@@ -8,6 +11,7 @@ export default function Login({ onLogin }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -16,13 +20,23 @@ export default function Login({ onLogin }) {
     setError("");
     setLoading(true);
     try {
-      const schema = mode === "login" ? loginSchema : signupSchema;
-      const values = parseOrThrow(schema, { email, password });
-      const { data } =
-        mode === "login"
-          ? await api.login(values.email, values.password)
-          : await api.signup(values.email, values.password);
-      await onLogin(data);
+      if (mode === "signup") {
+        const values = parseOrThrow(signupSchema, {
+          email,
+          password,
+          acceptTerms,
+        });
+        const { data } = await api.signup(
+          values.email,
+          values.password,
+          true,
+        );
+        await onLogin(data);
+      } else {
+        const values = parseOrThrow(loginSchema, { email, password });
+        const { data } = await api.login(values.email, values.password);
+        await onLogin(data);
+      }
     } catch (err) {
       setError(err.response?.data?.error || err.message);
     } finally {
@@ -38,16 +52,37 @@ export default function Login({ onLogin }) {
 
   const withGoogle = async () => {
     setError("");
+    if (mode === "signup" && !acceptTerms) {
+      setError("You must accept the Terms & Conditions to sign up");
+      return;
+    }
     setGoogleLoading(true);
     try {
-      const idToken = await googleSignIn();
-      const { data } = await api.loginGoogle(idToken);
-      await onLogin({ ...data, googleIdToken: idToken });
+      const { code, redirectUri } = await googleSignInWithFullAccess();
+      const { data } = await api.loginGoogleFull({
+        code,
+        redirectUri,
+        intent: mode === "signup" ? "signup" : "login",
+        acceptTerms: mode === "signup" ? true : false,
+      });
+      await onLogin({
+        ...data,
+        googleIdToken: data.googleIdToken || null,
+        gmailConnected: true,
+        loginMethod: "google",
+        accessToken: undefined,
+        scope: undefined,
+      });
     } catch (err) {
+      const apiError = err.response?.data?.error || err.message;
       setError(
-        err.message.includes(oauthSetup.redirectUri)
-          ? err.message
-          : `${err.message} (redirect URI: ${oauthSetup.redirectUri})`,
+        String(apiError).includes(oauthSetup.redirectUri)
+          ? apiError
+          : `${apiError}${
+              oauthSetup.redirectUri && /redirect/i.test(String(apiError))
+                ? ` (redirect URI: ${oauthSetup.redirectUri})`
+                : ""
+            }`,
       );
     } finally {
       setGoogleLoading(false);
@@ -56,6 +91,12 @@ export default function Login({ onLogin }) {
 
   const onKeyDown = (e) => {
     if (e.key === "Enter") submit();
+  };
+
+  const switchMode = (next) => {
+    setMode(next);
+    setError("");
+    setAcceptTerms(false);
   };
 
   return (
@@ -84,10 +125,26 @@ export default function Login({ onLogin }) {
         onKeyDown={onKeyDown}
         autoComplete={mode === "login" ? "current-password" : "new-password"}
       />
+      {mode === "signup" && (
+        <label className="terms-check">
+          <input
+            type="checkbox"
+            checked={acceptTerms}
+            onChange={(e) => setAcceptTerms(e.target.checked)}
+          />
+          <span>
+            I agree to the <a href="https://securedocs.share/terms" target="_blank" rel="noopener noreferrer" style={{ color: "var(--text)" }}>Terms &amp; Conditions</a>
+          </span>
+        </label>
+      )}
       <button
         className="btn btn-primary"
         onClick={submit}
-        disabled={loading || googleLoading}
+        disabled={
+          loading ||
+          googleLoading ||
+          (mode === "signup" && !acceptTerms)
+        }
       >
         {loading
           ? mode === "login"
@@ -100,13 +157,17 @@ export default function Login({ onLogin }) {
       <button
         className="btn btn-secondary"
         onClick={() => withGoogle()}
-        disabled={loading || googleLoading}
+        disabled={
+          loading ||
+          googleLoading ||
+          (mode === "signup" && !acceptTerms)
+        }
       >
         {googleLoading ? "Connecting Google..." : "Continue with Google"}
       </button>
       <button
         className="btn btn-ghost"
-        onClick={() => setMode(mode === "login" ? "signup" : "login")}
+        onClick={() => switchMode(mode === "login" ? "signup" : "login")}
       >
         {mode === "login"
           ? "Need an account? Sign up"

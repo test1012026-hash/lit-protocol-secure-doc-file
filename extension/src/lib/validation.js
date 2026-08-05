@@ -20,6 +20,11 @@ export const loginSchema = z.object({
 export const signupSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
+  acceptTerms: z
+    .boolean()
+    .refine((value) => value === true, {
+      message: "You must accept the Terms & Conditions to sign up",
+    }),
 });
 
 export const passwordResetRequestSchema = z.object({

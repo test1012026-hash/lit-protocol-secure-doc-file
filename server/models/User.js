@@ -21,6 +21,9 @@ const userSchema = new mongoose.Schema({
   gmailConnectState: { type: String, default: null },
   gmailConnectStateExpires: { type: Date, default: null },
   claimed: { type: Boolean, default: false },
+  termsAndConditions: { type: Boolean, default: false },
+  // Hashed app refresh JWT — used to mint new access tokens.
+  refreshTokenHash: { type: String, default: null },
   subscriptionExpiresAt: { type: Date, default: null },
 
   // RSA-OAEP public key (SPKI base64) — used by senders to encrypt every mail.

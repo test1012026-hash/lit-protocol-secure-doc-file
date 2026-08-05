@@ -44,12 +44,18 @@ export default function App() {
   }, []);
 
   const handleLogin = async (authData) => {
-    let next = authData;
+    // Drop ephemeral Google OAuth tokens before any persistence.
+    const sanitized = { ...authData };
+    delete sanitized.accessToken;
+    delete sanitized.scope;
+    delete sanitized.googleAccessToken;
+
+    let next = sanitized;
     if (DEMO_MODE) {
       try {
-        await ensureUserKeyPair(authData, getLitActionId);
+        await ensureUserKeyPair(sanitized, getLitActionId);
         next = {
-          ...authData,
+          ...sanitized,
           hasPublicKey: true,
         };
       } catch (err) {
@@ -81,12 +87,14 @@ export default function App() {
         console.error("Subscription refresh failed:", err);
       }
       if (!DEMO_MODE) return;
+      // Create keys only once; never regenerate on later opens/sends.
+      if (auth.hasPublicKey) return;
       try {
         await ensureUserKeyPair(
-          { uuid: auth.uuid, token: auth.token },
+          { uuid: auth.uuid, token: auth.token, hasPublicKey: false },
           getLitActionId,
         );
-        if (!cancelled && !auth.hasPublicKey) {
+        if (!cancelled) {
           setAuth((prev) => {
             if (!prev) return prev;
             const next = { ...prev, hasPublicKey: true };
@@ -104,6 +112,13 @@ export default function App() {
   }, [auth?.uuid, auth?.token]);
 
   const handleLogout = async () => {
+    try {
+      if (auth?.token) {
+        await api.logout(auth.token);
+      }
+    } catch {
+      // still clear local session
+    }
     await clearAuth();
     setAuth(null);
     setShowSetPassword(false);

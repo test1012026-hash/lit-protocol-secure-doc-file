@@ -246,7 +246,11 @@ export default function ReceiveFile({ auth }) {
   const [receiveMode, setReceiveMode] = useState("file");
   const [encryptedFile, setEncryptedFile] = useState(null);
   const [packageText, setPackageText] = useState("");
-  const [status, setStatus] = useState("");
+  const [statusByMode, setStatusByMode] = useState({
+    file: "",
+    paste: "",
+    mailbox: "",
+  });
   const [loading, setLoading] = useState(false);
   const [mailboxLoading, setMailboxLoading] = useState(false);
   const [mailboxLoadingMore, setMailboxLoadingMore] = useState(false);
@@ -258,14 +262,38 @@ export default function ReceiveFile({ auth }) {
   const mailboxNextPageTokenRef = useRef(null);
   const mailboxListRef = useRef(null);
 
-  const decryptPackage = async (encryptedPackage, meta = {}) => {
+  const setTabStatus = (mode, message) => {
+    setStatusByMode((prev) => ({ ...prev, [mode]: message || "" }));
+  };
+
+  const renderTabStatus = (mode) => {
+    const status = statusByMode[mode];
+    if (!status) return null;
+    return (
+      <p
+        className={
+          status.startsWith("Error")
+            ? "error-banner"
+            : "status-text status-ok"
+        }
+      >
+        {status}
+      </p>
+    );
+  };
+
+  const decryptPackage = async (
+    encryptedPackage,
+    meta = {},
+    statusMode = "file",
+  ) => {
     let googleIdToken = auth.googleIdToken || null;
     if (!DEMO_MODE && encryptedPackage.mode === "lit") {
-      setStatus("Verifying identity with Google...");
+      setTabStatus(statusMode, "Verifying identity with Google...");
       googleIdToken = googleIdToken || (await googleSignIn());
     }
 
-    setStatus("Unlocking private key + decrypting...");
+    setTabStatus(statusMode, "Unlocking private key + decrypting...");
     const decrypted = await decryptForRecipient({
       encryptedPackage,
       recipientUuid: auth.uuid,
@@ -291,7 +319,7 @@ export default function ReceiveFile({ auth }) {
     try {
       if (reset) {
         setMailboxLoading(true);
-        setStatus("Connecting to Gmail...");
+        setTabStatus("mailbox", "Connecting to Gmail...");
         mailboxNextPageTokenRef.current = null;
         setMailboxNextPageToken(null);
       } else {
@@ -305,7 +333,7 @@ export default function ReceiveFile({ auth }) {
         mailboxAccessTokenRef.current = accessToken;
       }
 
-      if (reset) setStatus("Loading your inbox...");
+      if (reset) setTabStatus("mailbox", "Loading your inbox...");
 
       const pageToken = reset ? null : mailboxNextPageTokenRef.current;
       const { messages, nextPageToken } = await listMailboxMessages(
@@ -326,13 +354,15 @@ export default function ReceiveFile({ auth }) {
       });
 
       if (reset) {
-        setStatus(
+        setTabStatus(
+          "mailbox",
           messages.length
             ? `Loaded ${messages.length} SecureDocShare email${messages.length === 1 ? "" : "s"}.`
             : "No SecureDocShare emails found.",
         );
       } else {
-        setStatus(
+        setTabStatus(
+          "mailbox",
           nextPageToken
             ? `Loaded more (${messages.length} new). Scroll for more.`
             : "All matching SecureDocShare emails loaded.",
@@ -340,7 +370,10 @@ export default function ReceiveFile({ auth }) {
       }
     } catch (err) {
       console.error("[SecureDocShare] Mailbox load failed", err);
-      setStatus("Error: " + (err.response?.data?.error || err.message));
+      setTabStatus(
+        "mailbox",
+        "Error: " + (err.response?.data?.error || err.message),
+      );
     } finally {
       setMailboxLoading(false);
       setMailboxLoadingMore(false);
@@ -399,7 +432,10 @@ export default function ReceiveFile({ auth }) {
 
       if (item.ciphertext) {
         const encryptedPackage = parseEncryptedPackage(item.ciphertext);
-        setStatus(await decryptPackage(encryptedPackage, meta));
+        setTabStatus(
+          "mailbox",
+          await decryptPackage(encryptedPackage, meta, "mailbox"),
+        );
         return;
       }
 
@@ -410,7 +446,7 @@ export default function ReceiveFile({ auth }) {
         );
       }
 
-      setStatus("Downloading secure attachment...");
+      setTabStatus("mailbox", "Downloading secure attachment...");
       const accessToken = await getMailboxAccessToken(auth.token, auth);
       let bytes = secure.bytes;
       if (!bytes && secure.attachmentId) {
@@ -424,10 +460,16 @@ export default function ReceiveFile({ auth }) {
         throw new Error("Could not download the secure attachment.");
       }
       const encryptedPackage = parseEncryptedPackageFromBytes(bytes);
-      setStatus(await decryptPackage(encryptedPackage, meta));
+      setTabStatus(
+        "mailbox",
+        await decryptPackage(encryptedPackage, meta, "mailbox"),
+      );
     } catch (err) {
       console.error("[SecureDocShare] Mailbox decrypt failed", err);
-      setStatus("Error: " + (err.response?.data?.error || err.message));
+      setTabStatus(
+        "mailbox",
+        "Error: " + (err.response?.data?.error || err.message),
+      );
     } finally {
       setDecryptingId(null);
       setLoading(false);
@@ -435,6 +477,7 @@ export default function ReceiveFile({ auth }) {
   };
 
   const handleReceive = async () => {
+    const mode = receiveMode === "paste" ? "paste" : "file";
     try {
       setLoading(true);
       if (!auth.uuid) {
@@ -444,22 +487,25 @@ export default function ReceiveFile({ auth }) {
       }
 
       let encryptedPackage;
-      if (receiveMode === "paste") {
+      if (mode === "paste") {
         const values = parseOrThrow(receivePasteFormSchema, { packageText });
-        setStatus("Reading pasted encrypted package...");
+        setTabStatus(mode, "Reading pasted encrypted package...");
         encryptedPackage = parseEncryptedPackage(values.packageText);
       } else {
         const values = parseOrThrow(receiveFileFormSchema, { encryptedFile });
-        setStatus("Reading encrypted file...");
+        setTabStatus(mode, "Reading encrypted file...");
         const buffer = await values.encryptedFile.arrayBuffer();
         encryptedPackage = parseEncryptedPackageFromBytes(
           new Uint8Array(buffer),
         );
       }
 
-      setStatus(await decryptPackage(encryptedPackage));
+      setTabStatus(mode, await decryptPackage(encryptedPackage, {}, mode));
     } catch (err) {
-      setStatus("Error: " + (err.response?.data?.error || err.message));
+      setTabStatus(
+        mode,
+        "Error: " + (err.response?.data?.error || err.message),
+      );
     } finally {
       setLoading(false);
     }
@@ -590,48 +636,48 @@ export default function ReceiveFile({ auth }) {
               ) : null}
             </ul>
           )}
+          {renderTabStatus("mailbox")}
         </div>
       ) : receiveMode === "paste" ? (
-        <textarea
-          className="field"
-          placeholder="Paste Message ciphertext from email (sds.…)"
-          value={packageText}
-          onChange={(e) => setPackageText(e.target.value)}
-          rows={6}
-          style={{
-            resize: "vertical",
-            fontFamily: "ui-monospace, monospace",
-            fontSize: 12,
-          }}
-        />
+        <div>
+          <textarea
+            className="field"
+            placeholder="Paste Message ciphertext from email (sds.…)"
+            value={packageText}
+            onChange={(e) => setPackageText(e.target.value)}
+            rows={6}
+            style={{
+              resize: "vertical",
+              fontFamily: "ui-monospace, monospace",
+              fontSize: 12,
+            }}
+          />
+          <button
+            className="btn btn-primary"
+            onClick={handleReceive}
+            disabled={loading}
+          >
+            {loading ? "Decrypting..." : "Decrypt and open"}
+          </button>
+          {renderTabStatus("paste")}
+        </div>
       ) : (
-        <input
-          className="field"
-          type="file"
-          accept=".securepdf,.securemsg,application/json,text/plain"
-          onChange={(e) => setEncryptedFile(e.target.files?.[0] || null)}
-        />
-      )}
-
-      {receiveMode !== "mailbox" && (
-        <button
-          className="btn btn-primary"
-          onClick={handleReceive}
-          disabled={loading}
-        >
-          {loading ? "Decrypting..." : "Decrypt and open"}
-        </button>
-      )}
-      {status && (
-        <p
-          className={
-            status.startsWith("Error")
-              ? "error-banner"
-              : "status-text status-ok"
-          }
-        >
-          {status}
-        </p>
+        <div>
+          <input
+            className="field"
+            type="file"
+            accept=".securepdf,.securemsg,application/json,text/plain"
+            onChange={(e) => setEncryptedFile(e.target.files?.[0] || null)}
+          />
+          <button
+            className="btn btn-primary"
+            onClick={handleReceive}
+            disabled={loading}
+          >
+            {loading ? "Decrypting..." : "Decrypt and open"}
+          </button>
+          {renderTabStatus("file")}
+        </div>
       )}
     </div>
   );
