@@ -12,6 +12,8 @@ const PROFILE_KEY = "authProfile";
 const SECRETS_KEY = "authSecrets";
 const LEGACY_AUTH_KEY = "auth";
 const TAB_KEY = "activeTab";
+/** Cached Google grant scopes — belongs to the signed-in account only. */
+const SCOPE_CACHE_KEY = "googleGrantedScopes";
 
 const PROFILE_FIELDS = [
   "uuid",
@@ -152,7 +154,7 @@ export async function saveAuth(auth) {
 export async function clearAuth() {
   await Promise.all([
     storageRemove("local", [PROFILE_KEY, LEGACY_AUTH_KEY]),
-    storageRemove("session", [SECRETS_KEY]),
+    storageRemove("session", [SECRETS_KEY, SCOPE_CACHE_KEY]),
   ]);
 }
 

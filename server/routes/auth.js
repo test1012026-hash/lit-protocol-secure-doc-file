@@ -63,6 +63,14 @@ async function attachAuthTokens(user) {
   };
 }
 
+/** Union of previously granted scopes and newly returned ones. */
+function mergeGrantedScopes(existing, incoming) {
+  const set = new Set(
+    `${existing || ""} ${incoming || ""}`.split(/\s+/).filter(Boolean),
+  );
+  return Array.from(set).join(" ");
+}
+
 function userPayload(user, tokens) {
   return {
     token: tokens.token,
@@ -152,7 +160,7 @@ router.post("/login", validateBody(loginSchema), async (req, res) => {
 async function upsertGoogleUser(
   payload,
   gmailRefreshToken,
-  { acceptTerms = false, intent = "login" } = {},
+  { acceptTerms = false, intent = "login", gmailScopes = "" } = {},
 ) {
   const email = normalizeEmail(payload.email);
 
@@ -203,6 +211,9 @@ async function upsertGoogleUser(
   if (gmailRefreshToken) {
     user.gmailRefreshToken = gmailRefreshToken;
   }
+  if (gmailScopes) {
+    user.gmailScopes = mergeGrantedScopes(user.gmailScopes, gmailScopes);
+  }
   await finalizeClaimedUser(user);
   return user;
 }
@@ -234,13 +245,6 @@ router.post(
               "Google did not return an id_token. Approve Sign-in + Gmail/Contacts access and try again.",
           });
         }
-        if (!gmailRefreshToken) {
-          return res.status(401).json({
-            error:
-              "Google did not return offline access. Approve all requested permissions (prompt again if needed).",
-            code: "GMAIL_CONSENT_REQUIRED",
-          });
-        }
       }
 
       const audiences = [
@@ -256,14 +260,25 @@ router.post(
       const user = await upsertGoogleUser(payload, gmailRefreshToken, {
         acceptTerms: Boolean(req.body.acceptTerms),
         intent: req.body.intent === "signup" ? "signup" : "login",
+        gmailScopes: scope,
       });
+
+      // Google only returns a refresh token on first grant; ask for consent
+      // again only when we have none stored for this user.
+      if (req.body.code && !user.gmailRefreshToken) {
+        return res.status(401).json({
+          error:
+            "Google did not return offline access. Approve all requested permissions.",
+          code: "GMAIL_CONSENT_REQUIRED",
+        });
+      }
 
       const tokens = await attachAuthTokens(user);
       res.json({
         ...userPayload(user, tokens),
         googleIdToken: idToken,
         accessToken,
-        scope,
+        scope: user.gmailScopes || scope,
       });
     } catch (err) {
       const msg = err.message || String(err);
@@ -563,12 +578,14 @@ router.post("/google/refresh", authMiddleware, async (req, res) => {
 
     if (tokens.refresh_token) {
       user.gmailRefreshToken = tokens.refresh_token;
-      await user.save();
     }
+    user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
+    await user.save();
 
     res.json({
       googleIdToken: tokens.id_token,
       gmailConnected: Boolean(user.gmailRefreshToken),
+      scope: user.gmailScopes,
     });
   } catch (err) {
     res.status(401).json({ error: err.message });
@@ -596,7 +613,6 @@ router.post(
 
       if (tokens.refresh_token) {
         user.gmailRefreshToken = tokens.refresh_token;
-        await user.save();
       } else if (!user.gmailRefreshToken) {
         return res.status(401).json({
           error:
@@ -604,11 +620,13 @@ router.post(
           code: "GMAIL_CONSENT_REQUIRED",
         });
       }
+      user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
+      await user.save();
 
       res.json({
         accessToken: tokens.access_token,
         gmailConnected: Boolean(user.gmailRefreshToken),
-        scope: tokens.scope || "",
+        scope: user.gmailScopes,
       });
     } catch (err) {
       const msg = err.message || String(err);
@@ -621,7 +639,7 @@ router.post("/gmail/disconnect", authMiddleware, async (req, res) => {
   try {
     await User.updateOne(
       { uuid: req.user.uuid },
-      { $unset: { gmailRefreshToken: 1 } },
+      { $unset: { gmailRefreshToken: 1 }, $set: { gmailScopes: "" } },
     );
     res.json({ gmailConnected: false });
   } catch (err) {
@@ -633,7 +651,10 @@ router.get("/gmail/status", authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ uuid: req.user.uuid });
     if (!user) return res.status(404).json({ error: "User not found" });
-    res.json({ gmailConnected: Boolean(user.gmailRefreshToken) });
+    res.json({
+      gmailConnected: Boolean(user.gmailRefreshToken),
+      scope: user.gmailScopes || "",
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -673,6 +694,7 @@ router.post("/gmail/send-token", authMiddleware, async (req, res) => {
       res.json({
         accessToken,
         from: user.email,
+        scope: user.gmailScopes || "",
         appUrl: (process.env.APP_URL || "").replace(/\/$/, ""),
       });
     } catch (tokenErr) {
@@ -713,6 +735,7 @@ router.post("/gmail/mailbox-token", authMiddleware, async (req, res) => {
       res.json({
         accessToken,
         email: user.email,
+        scope: user.gmailScopes || "",
       });
     } catch (tokenErr) {
       const msg = tokenErr.message || String(tokenErr);
@@ -791,6 +814,7 @@ router.get("/gmail/callback", async (req, res) => {
     }
 
     user.gmailRefreshToken = tokens.refresh_token;
+    user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
     if (googleEmail) user.email = normalizeEmail(googleEmail);
     await user.save();
 

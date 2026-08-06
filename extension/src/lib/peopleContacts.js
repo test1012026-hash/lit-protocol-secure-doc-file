@@ -1,6 +1,11 @@
 /**
- * Google People API — email autocomplete from Contacts / Other contacts.
+ * Google People API — search contacts by query (textbox text).
+ * Uses people:searchContacts + otherContacts:search with `query` param.
  */
+
+const SEARCH_PAGE_SIZE = 30; // API max
+const READ_MASK = "names,emailAddresses";
+const warmedAccessTokens = new Set();
 
 function personToSuggestions(person) {
   const name =
@@ -16,6 +21,14 @@ function personToSuggestions(person) {
   }));
 }
 
+function resultsToSuggestions(data) {
+  const out = [];
+  for (const row of data?.results || []) {
+    out.push(...personToSuggestions(row.person || row));
+  }
+  return out;
+}
+
 function dedupeByEmail(items) {
   const seen = new Set();
   const out = [];
@@ -26,25 +39,6 @@ function dedupeByEmail(items) {
     out.push(item);
   }
   return out;
-}
-
-export function filterContactEmails(items, query, limit = 8) {
-  const q = String(query || "").trim().toLowerCase();
-  if (!q) return [];
-  return dedupeByEmail(items)
-    .filter(
-      (item) =>
-        item.email.includes(q) || item.name.toLowerCase().includes(q),
-    )
-    .sort((a, b) => {
-      const aStarts =
-        a.email.startsWith(q) || a.name.toLowerCase().startsWith(q);
-      const bStarts =
-        b.email.startsWith(q) || b.name.toLowerCase().startsWith(q);
-      if (aStarts !== bStarts) return aStarts ? -1 : 1;
-      return a.email.localeCompare(b.email);
-    })
-    .slice(0, limit);
 }
 
 function classifyPeopleError(status, body, bodyText) {
@@ -95,31 +89,51 @@ async function peopleFetch(url, accessToken) {
   return body || {};
 }
 
-/**
- * Load contact emails (Connections + Other contacts).
- */
-export async function loadGoogleContactEmails(accessToken) {
-  if (!accessToken) return [];
+/** Google requires an empty-query warmup before search for cache freshness. */
+async function ensureSearchWarmed(accessToken) {
+  if (warmedAccessTokens.has(accessToken)) return;
+  await Promise.allSettled([
+    peopleFetch(
+      `https://people.googleapis.com/v1/people:searchContacts?query=&readMask=${encodeURIComponent(READ_MASK)}&pageSize=1`,
+      accessToken,
+    ),
+    peopleFetch(
+      `https://people.googleapis.com/v1/otherContacts:search?query=&readMask=${encodeURIComponent(READ_MASK)}&pageSize=1`,
+      accessToken,
+    ),
+  ]);
+  warmedAccessTokens.add(accessToken);
+  if (warmedAccessTokens.size > 20) {
+    const first = warmedAccessTokens.values().next().value;
+    warmedAccessTokens.delete(first);
+  }
+}
 
+/**
+ * Search Google Contacts + Other contacts for the typed query.
+ */
+export async function searchGoogleContactEmails(accessToken, query) {
+  const q = String(query || "").trim();
+  if (!accessToken || !q) return [];
+
+  await ensureSearchWarmed(accessToken);
+
+  const encoded = encodeURIComponent(q);
   const results = [];
   const errors = [];
 
   const tasks = [
     peopleFetch(
-      "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses&pageSize=200&sortOrder=FIRST_NAME_ASCENDING",
+      `https://people.googleapis.com/v1/people:searchContacts?query=${encoded}&readMask=${encodeURIComponent(READ_MASK)}&pageSize=${SEARCH_PAGE_SIZE}`,
       accessToken,
     ).then((data) => {
-      for (const person of data.connections || []) {
-        results.push(...personToSuggestions(person));
-      }
+      results.push(...resultsToSuggestions(data));
     }),
     peopleFetch(
-      "https://people.googleapis.com/v1/otherContacts?readMask=names,emailAddresses&pageSize=200",
+      `https://people.googleapis.com/v1/otherContacts:search?query=${encoded}&readMask=${encodeURIComponent(READ_MASK)}&pageSize=${SEARCH_PAGE_SIZE}`,
       accessToken,
     ).then((data) => {
-      for (const person of data.otherContacts || []) {
-        results.push(...personToSuggestions(person));
-      }
+      results.push(...resultsToSuggestions(data));
     }),
   ];
 

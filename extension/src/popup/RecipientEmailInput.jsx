@@ -1,9 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { getPeopleAccessToken } from "../lib/googleAuth";
-import {
-  filterContactEmails,
-  loadGoogleContactEmails,
-} from "../lib/peopleContacts";
+import { searchGoogleContactEmails } from "../lib/peopleContacts";
 import { normalizeEmail } from "../lib/email";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
@@ -29,8 +26,8 @@ export default function RecipientEmailInput({
   const [activeIndex, setActiveIndex] = useState(-1);
   const wrapRef = useRef(null);
   const inputRef = useRef(null);
-  const contactsCache = useRef(null);
-  const loadingContacts = useRef(false);
+  const accessTokenRef = useRef(null);
+  const tokenLoading = useRef(false);
   const reqId = useRef(0);
 
   const selectedSet = new Set(emails.map((e) => normalizeEmail(e)));
@@ -43,27 +40,28 @@ export default function RecipientEmailInput({
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
-  async function ensureContactsLoaded({ force = false } = {}) {
-    if (!force && contactsCache.current) return contactsCache.current;
-    if (loadingContacts.current) {
+  async function ensureAccessToken({ force = false } = {}) {
+    if (!force && accessTokenRef.current) return accessTokenRef.current;
+    if (tokenLoading.current) {
       for (let i = 0; i < 50; i++) {
         await new Promise((r) => setTimeout(r, 100));
-        if (contactsCache.current) return contactsCache.current;
+        if (accessTokenRef.current) return accessTokenRef.current;
       }
     }
 
-    loadingContacts.current = true;
-    setHint("Connecting Google Contacts…");
+    tokenLoading.current = true;
     setNeedsContacts(false);
     try {
-      const token = await getPeopleAccessToken(auth.token, auth);
-      const contacts = await loadGoogleContactEmails(token);
-      contactsCache.current = contacts;
+      // Typing never opens a Google consent window; only the explicit
+      // "Allow Google Contacts" button (force) may prompt.
+      const token = await getPeopleAccessToken(auth.token, auth, {
+        interactive: force,
+      });
+      accessTokenRef.current = token;
       setNeedsContacts(false);
-      setHint("");
-      return contacts;
+      return token;
     } catch (err) {
-      contactsCache.current = null;
+      accessTokenRef.current = null;
       if (
         err?.code === "CONTACTS_SCOPE_REQUIRED" ||
         err?.code === "PEOPLE_API_DISABLED"
@@ -72,7 +70,7 @@ export default function RecipientEmailInput({
       }
       throw err;
     } finally {
-      loadingContacts.current = false;
+      tokenLoading.current = false;
     }
   }
 
@@ -82,8 +80,7 @@ export default function RecipientEmailInput({
       (item) => !selectedSet.has(normalizeEmail(item.email)),
     );
     const typedNorm = typed ? normalizeEmail(typed) : "";
-    const typedAlready =
-      typedNorm && selectedSet.has(typedNorm);
+    const typedAlready = typedNorm && selectedSet.has(typedNorm);
     const typedInSuggestions = rows.some(
       (r) => normalizeEmail(r.email) === typedNorm,
     );
@@ -104,7 +101,7 @@ export default function RecipientEmailInput({
         disabled: !isValidEmail(typed),
       });
     }
-    return rows.slice(0, 10);
+    return rows;
   };
 
   useEffect(() => {
@@ -120,23 +117,30 @@ export default function RecipientEmailInput({
     const id = ++reqId.current;
     const timer = setTimeout(async () => {
       setLoading(true);
+      setHint("");
       try {
-        let contacts = contactsCache.current || [];
+        let rows = [];
         try {
-          contacts = await ensureContactsLoaded();
-        } catch {
-          contacts = [];
+          const token = await ensureAccessToken();
+          const matches = await searchGoogleContactEmails(token, q);
+          rows = buildMenu(q, matches);
+        } catch (err) {
+          rows = buildMenu(q, []);
+          if (
+            err?.code === "CONTACTS_SCOPE_REQUIRED" ||
+            err?.code === "PEOPLE_API_DISABLED"
+          ) {
+            setHint(err.message || "Google Contacts permission needed.");
+          }
         }
         if (reqId.current !== id) return;
-        const rows = buildMenu(q, filterContactEmails(contacts, q, 8));
         setSuggestions(rows);
         setOpen(rows.length > 0);
         setActiveIndex(rows.length ? 0 : -1);
-        if (!rows.length) setHint("");
       } finally {
         if (reqId.current === id) setLoading(false);
       }
-    }, 180);
+    }, 250);
 
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -194,7 +198,12 @@ export default function RecipientEmailInput({
       return;
     }
     if (e.key === "Enter" || e.key === "Tab" || e.key === ",") {
-      if (open && activeIndex >= 0 && suggestions[activeIndex] && !suggestions[activeIndex].disabled) {
+      if (
+        open &&
+        activeIndex >= 0 &&
+        suggestions[activeIndex] &&
+        !suggestions[activeIndex].disabled
+      ) {
         e.preventDefault();
         pickSuggestion(suggestions[activeIndex]);
         return;
@@ -210,16 +219,19 @@ export default function RecipientEmailInput({
     setLoading(true);
     setHint("Waiting for Google permission…");
     try {
-      contactsCache.current = null;
-      await ensureContactsLoaded({ force: true });
-      if (query.trim().length >= 2) {
-        const rows = buildMenu(
-          query,
-          filterContactEmails(contactsCache.current || [], query, 8),
+      accessTokenRef.current = null;
+      await ensureAccessToken({ force: true });
+      const q = query.trim();
+      if (q.length >= 2) {
+        const matches = await searchGoogleContactEmails(
+          accessTokenRef.current,
+          q,
         );
+        const rows = buildMenu(q, matches);
         setSuggestions(rows);
         setOpen(rows.length > 0);
       }
+      setHint("");
     } catch (err) {
       setHint(err.message || "Could not connect Google Contacts.");
       setNeedsContacts(true);
@@ -302,9 +314,7 @@ export default function RecipientEmailInput({
                 onMouseEnter={() => setActiveIndex(index)}
                 onClick={() => pickSuggestion(item)}
               >
-                <span className="recipient-suggest-name">
-                  {item.isCustom ? item.name : item.name}
-                </span>
+                <span className="recipient-suggest-name">{item.name}</span>
                 <span className="recipient-suggest-email">
                   {item.isCustom && isValidEmail(item.email)
                     ? `Add “${item.email}”`

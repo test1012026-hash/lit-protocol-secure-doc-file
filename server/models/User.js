@@ -18,6 +18,8 @@ const userSchema = new mongoose.Schema({
   passwordHash: { type: String, default: null },
   googleId: { type: String, default: null },
   gmailRefreshToken: { type: String, default: null },
+  // Space-separated Google scopes already granted, so we never re-prompt for them.
+  gmailScopes: { type: String, default: "" },
   gmailConnectState: { type: String, default: null },
   gmailConnectStateExpires: { type: Date, default: null },
   claimed: { type: Boolean, default: false },

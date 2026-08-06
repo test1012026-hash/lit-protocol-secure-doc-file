@@ -26,11 +26,7 @@ export default function Login({ onLogin }) {
           password,
           acceptTerms,
         });
-        const { data } = await api.signup(
-          values.email,
-          values.password,
-          true,
-        );
+        const { data } = await api.signup(values.email, values.password, true);
         await onLogin(data);
       } else {
         const values = parseOrThrow(loginSchema, { email, password });
@@ -58,13 +54,31 @@ export default function Login({ onLogin }) {
     }
     setGoogleLoading(true);
     try {
-      const { code, redirectUri } = await googleSignInWithFullAccess();
-      const { data } = await api.loginGoogleFull({
-        code,
-        redirectUri,
-        intent: mode === "signup" ? "signup" : "login",
-        acceptTerms: mode === "signup" ? true : false,
-      });
+      const signIn = async (forceConsent) => {
+        const { code, redirectUri } = await googleSignInWithFullAccess({
+          forceConsent,
+        });
+        return api.loginGoogleFull({
+          code,
+          redirectUri,
+          intent: mode === "signup" ? "signup" : "login",
+          acceptTerms: mode === "signup" ? true : false,
+        });
+      };
+
+      let data;
+      try {
+        ({ data } = await signIn(mode === "signup"));
+      } catch (err) {
+        if (
+          mode === "signup" ||
+          err.response?.data?.code !== "GMAIL_CONSENT_REQUIRED"
+        ) {
+          throw err;
+        }
+        ({ data } = await signIn(true));
+      }
+
       await onLogin({
         ...data,
         googleIdToken: data.googleIdToken || null,
@@ -105,9 +119,7 @@ export default function Login({ onLogin }) {
       <p className="brand-sub">
         Encrypt and share documents with identity-locked access.
       </p>
-      <h3 className="auth-title">
-        {mode === "login" ? "Log in" : "Sign up"}
-      </h3>
+      <h3 className="auth-title">{mode === "login" ? "Log in" : "Sign up"}</h3>
       <input
         className="field"
         placeholder="Email"
@@ -133,7 +145,15 @@ export default function Login({ onLogin }) {
             onChange={(e) => setAcceptTerms(e.target.checked)}
           />
           <span>
-            I agree to the <a href="https://securedocs.share/terms" target="_blank" rel="noopener noreferrer" style={{ color: "var(--text)" }}>Terms &amp; Conditions</a>
+            I agree to the{" "}
+            <a
+              href="https://securedocs.share/terms"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--text)" }}
+            >
+              Terms &amp; Conditions
+            </a>
           </span>
         </label>
       )}
@@ -141,9 +161,7 @@ export default function Login({ onLogin }) {
         className="btn btn-primary"
         onClick={submit}
         disabled={
-          loading ||
-          googleLoading ||
-          (mode === "signup" && !acceptTerms)
+          loading || googleLoading || (mode === "signup" && !acceptTerms)
         }
       >
         {loading
@@ -151,16 +169,14 @@ export default function Login({ onLogin }) {
             ? "Signing in..."
             : "Creating account..."
           : mode === "login"
-            ? "Log in"
-            : "Sign up"}
+          ? "Log in"
+          : "Sign up"}
       </button>
       <button
         className="btn btn-secondary"
         onClick={() => withGoogle()}
         disabled={
-          loading ||
-          googleLoading ||
-          (mode === "signup" && !acceptTerms)
+          loading || googleLoading || (mode === "signup" && !acceptTerms)
         }
       >
         {googleLoading ? "Connecting Google..." : "Continue with Google"}

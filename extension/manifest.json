@@ -26,14 +26,10 @@
     "windows"
   ],
   "host_permissions": [
-    "https://*.litprotocol.com/*",
     "https://oauth2.googleapis.com/*",
     "https://www.googleapis.com/*",
     "https://gmail.googleapis.com/*",
     "https://people.googleapis.com/*",
-    "https://api.devnet.solana.com/*",
-    "https://*.solana.com/*",
-    "https://*.g.alchemy.com/*",
     "http://localhost:4000/*",
     "http://127.0.0.1:4000/*",
     "https://*.onrender.com/*",

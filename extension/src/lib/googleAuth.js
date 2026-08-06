@@ -145,8 +145,11 @@ export async function googleSignIn() {
 /**
  * Google signup/login with all app scopes in one consent
  * (identity + Gmail send/read + Contacts). Returns auth code for the server.
+ *
+ * `forceConsent` re-shows the consent screen; only needed when the server has
+ * no refresh token stored, since Google issues one just on the first grant.
  */
-export async function googleSignInWithFullAccess() {
+export async function googleSignInWithFullAccess({ forceConsent = false } = {}) {
   const redirectUri = assertExtensionId();
   const authUrl =
     "https://accounts.google.com/o/oauth2/v2/auth" +
@@ -155,7 +158,7 @@ export async function googleSignInWithFullAccess() {
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&scope=${encodeURIComponent(GOOGLE_FULL_LOGIN_SCOPES)}` +
     "&access_type=offline" +
-    "&prompt=consent" +
+    `&prompt=${forceConsent ? "consent" : "select_account"}` +
     "&include_granted_scopes=true";
 
   try {
@@ -252,7 +255,7 @@ async function classifyPeopleProbe(accessToken) {
 
 /**
  * Connect Gmail + Contacts. Returns { accessToken, ... }.
- * forceReconsent clears old refresh token so Google can issue Contacts scopes.
+ * forceReconsent re-shows the consent screen to add missing scopes.
  */
 export async function ensureGmailConnected(
   jwtToken,
@@ -262,13 +265,12 @@ export async function ensureGmailConnected(
   if (!forceReconsent) {
     const { data: status } = await api.gmailStatus(jwtToken);
     if (status.gmailConnected) {
-      return { accessToken: null, gmailConnected: true, reused: true };
-    }
-  } else {
-    try {
-      await api.gmailDisconnect(jwtToken);
-    } catch {
-      // continue
+      return {
+        accessToken: null,
+        gmailConnected: true,
+        scope: status.scope || "",
+        reused: true,
+      };
     }
   }
 
@@ -321,30 +323,84 @@ export async function ensureGmailConnected(
   };
 }
 
+const SCOPE_CACHE_KEY = "googleGrantedScopes";
+
+async function readCachedScope() {
+  try {
+    const store = chrome.storage.session || chrome.storage.local;
+    const data = await store.get(SCOPE_CACHE_KEY);
+    return String(data?.[SCOPE_CACHE_KEY] || "");
+  } catch {
+    return "";
+  }
+}
+
+async function cacheScope(scope) {
+  if (!scope) return;
+  try {
+    const store = chrome.storage.session || chrome.storage.local;
+    await store.set({ [SCOPE_CACHE_KEY]: scope });
+  } catch {
+    // cache is best-effort
+  }
+}
+
 /**
- * Access token that can call People API. Forces Contacts consent when needed.
+ * Scopes the user already approved. Prefers what the server recorded at consent
+ * time so we don't re-check (or re-prompt) on every popup open.
  */
-export async function getPeopleAccessToken(jwtToken, auth) {
+async function resolveGrantedScope(serverScope, accessToken) {
+  if (serverScope) {
+    await cacheScope(serverScope);
+    return serverScope;
+  }
+  const cached = await readCachedScope();
+  if (cached) return cached;
+  if (!accessToken) return "";
+  const scope = await getAccessTokenScopes(accessToken);
+  await cacheScope(scope);
+  return scope;
+}
+
+function scopeRequiredError(message, code) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+/**
+ * Access token that can call People API.
+ * Only asks for consent when Contacts was never granted, and only when
+ * `interactive` (e.g. the user clicked "Allow Google Contacts").
+ */
+export async function getPeopleAccessToken(
+  jwtToken,
+  auth,
+  { interactive = true } = {},
+) {
   let accessToken = null;
+  let serverScope = "";
 
   try {
     const { data } = await api.gmailSendToken(jwtToken);
     accessToken = data.accessToken || null;
+    serverScope = data.scope || "";
   } catch {
     accessToken = null;
   }
 
   if (accessToken) {
-    const probe = await classifyPeopleProbe(accessToken);
-    if (probe.ok) return accessToken;
-    if (probe.code === "PEOPLE_API_DISABLED") {
-      const err = new Error(probe.message);
-      err.code = probe.code;
-      throw err;
-    }
+    const scope = await resolveGrantedScope(serverScope, accessToken);
+    if (scopeHasContacts(scope)) return accessToken;
   }
 
-  // Re-consent for Contacts (and Gmail).
+  if (!interactive) {
+    throw scopeRequiredError(
+      "Google Contacts permission is missing. Click “Allow Google Contacts” and approve Contacts access.",
+      "CONTACTS_SCOPE_REQUIRED",
+    );
+  }
+
   const connected = await ensureGmailConnected(jwtToken, auth, {
     forceReconsent: true,
   });
@@ -352,48 +408,45 @@ export async function getPeopleAccessToken(jwtToken, auth) {
   if (!accessToken) {
     const { data } = await api.gmailSendToken(jwtToken);
     accessToken = data.accessToken;
+    serverScope = data.scope || "";
   }
 
   const scope =
-    connected.scope || (await getAccessTokenScopes(accessToken)) || "";
+    connected.scope || serverScope || (await getAccessTokenScopes(accessToken));
+  await cacheScope(scope);
   if (!scopeHasContacts(scope)) {
-    const err = new Error(
+    throw scopeRequiredError(
       "Contacts scope was not granted. On the Google consent screen, allow “See and download your contacts” (and Other contacts), then try again.",
+      "CONTACTS_SCOPE_REQUIRED",
     );
-    err.code = "CONTACTS_SCOPE_REQUIRED";
-    throw err;
   }
 
   const probe = await classifyPeopleProbe(accessToken);
-  if (!probe.ok) {
-    const err = new Error(probe.message);
-    err.code = probe.code;
-    throw err;
+  if (!probe.ok && probe.code === "PEOPLE_API_DISABLED") {
+    throw scopeRequiredError(probe.message, probe.code);
   }
 
   return accessToken;
 }
 
 /**
- * Access token that can read Gmail (list/open messages). Forces re-consent when
- * gmail.readonly is missing from the stored refresh token.
+ * Access token that can read Gmail (list/open messages).
+ * Re-consents only when gmail.readonly was never granted.
  */
 export async function getMailboxAccessToken(jwtToken, auth) {
   let accessToken = null;
+  let serverScope = "";
 
   try {
     const { data } = await api.gmailMailboxToken(jwtToken);
     accessToken = data.accessToken || null;
-  } catch (err) {
-    if (err.response?.data?.code === "GMAIL_NOT_CONNECTED") {
-      accessToken = null;
-    } else {
-      accessToken = null;
-    }
+    serverScope = data.scope || "";
+  } catch {
+    accessToken = null;
   }
 
   if (accessToken) {
-    const scope = await getAccessTokenScopes(accessToken);
+    const scope = await resolveGrantedScope(serverScope, accessToken);
     if (scopeHasGmailReadonly(scope)) return accessToken;
   }
 
@@ -404,16 +457,17 @@ export async function getMailboxAccessToken(jwtToken, auth) {
   if (!accessToken) {
     const { data } = await api.gmailMailboxToken(jwtToken);
     accessToken = data.accessToken;
+    serverScope = data.scope || "";
   }
 
   const scope =
-    connected.scope || (await getAccessTokenScopes(accessToken)) || "";
+    connected.scope || serverScope || (await getAccessTokenScopes(accessToken));
+  await cacheScope(scope);
   if (!scopeHasGmailReadonly(scope)) {
-    const err = new Error(
+    throw scopeRequiredError(
       "Gmail read permission is missing. On the Google consent screen, allow “Read your email” / View your email messages, then try again.",
+      "GMAIL_READONLY_REQUIRED",
     );
-    err.code = "GMAIL_READONLY_REQUIRED";
-    throw err;
   }
 
   return accessToken;
