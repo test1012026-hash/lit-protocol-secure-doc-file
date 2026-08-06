@@ -8,6 +8,7 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const { FREE_TRIAL_DAYS, trialExpiresFrom } = require("../lib/subscription");
+const { getPlainEmail } = require("../lib/emailCrypto");
 
 async function main() {
   if (!process.env.MONGODB_URI) {
@@ -26,7 +27,7 @@ async function main() {
     await user.save();
     updated += 1;
     console.log(
-      `Set expires for ${user.email}: ${user.subscriptionExpiresAt.toISOString()}`,
+      `Set expires for ${getPlainEmail(user)}: ${user.subscriptionExpiresAt.toISOString()}`,
     );
   }
 

@@ -3,7 +3,7 @@
  * -------------------------
  * - Public key → MongoDB (used for every send).
  * - Private key → MongoDB, AES-GCM wrapped.
- * - Passphrase = uuid + "|" + live Lit action id from list_actions (not stored).
+ * - Passphrase = uuid + "|" + Lit action id from VITE_LIT_ACTION_ID (not stored).
  * - Every email: new AES key wrapped with recipient public key.
  */
 
@@ -26,7 +26,7 @@ function base64ToBytes(base64) {
   return bytes;
 }
 
-/** Passphrase = account UUID + live Lit action id. */
+/** Passphrase = account UUID + VITE_LIT_ACTION_ID. */
 export function buildKeyPassphrase(uuid, actionId) {
   const u = String(uuid || "").trim();
   const a = String(actionId || "").trim();
@@ -113,24 +113,24 @@ export async function wrapPrivateKeyPkcs8(pkcs8Base64, uuid, actionId) {
     new TextEncoder().encode(pkcs8Base64),
   );
   return {
-    privateKeyEnc: bytesToBase64(new Uint8Array(encrypted)),
-    privateKeyIv: bytesToBase64(iv),
-    privateKeySalt: bytesToBase64(salt),
+    thor: bytesToBase64(new Uint8Array(encrypted)),
+    hulk: bytesToBase64(iv),
+    venom: bytesToBase64(salt),
   };
 }
 
 export async function unwrapPrivateKey({
-  privateKeyEnc,
-  privateKeyIv,
-  privateKeySalt,
+  thor,
+  hulk,
+  venom,
   actionId,
   uuid,
 }) {
-  if (!privateKeyEnc || !privateKeyIv || !privateKeySalt || !actionId) {
+  if (!thor || !hulk || !venom || !actionId) {
     throw new Error("Encrypted private key is incomplete, or Lit action id is missing.");
   }
-  const salt = base64ToBytes(privateKeySalt);
-  const iv = base64ToBytes(privateKeyIv);
+  const salt = base64ToBytes(venom);
+  const iv = base64ToBytes(hulk);
   const wrapKey = await deriveWrapKey(
     buildKeyPassphrase(uuid, actionId),
     salt,
@@ -140,12 +140,12 @@ export async function unwrapPrivateKey({
     const plain = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv },
       wrapKey,
-      base64ToBytes(privateKeyEnc),
+      base64ToBytes(thor),
     );
     pkcs8Base64 = new TextDecoder().decode(plain);
   } catch {
     throw new Error(
-      "Cannot unlock private key. Passphrase needs your UUID and the current Lit action id from list_actions.",
+      "Cannot unlock private key. Passphrase needs your UUID and VITE_LIT_ACTION_ID.",
     );
   }
   return importPrivateKeyPkcs8Base64(pkcs8Base64);
@@ -153,17 +153,13 @@ export async function unwrapPrivateKey({
 
 function hasCompleteKeyBundle(data) {
   return Boolean(
-    data?.publicKeySpki &&
-      data?.privateKeyEnc &&
-      data?.privateKeyIv &&
-      data?.privateKeySalt,
+    data?.iron &&
+      data?.thor &&
+      data?.hulk &&
+      data?.venom,
   );
 }
 
-/**
- * Create RSA keys for a recipient who has never logged in (so send can proceed).
- * Private key is wrapped with recipientUuid + live Lit action id (same as login path).
- */
 export async function provisionRecipientKeyPair({
   recipientEmail,
   recipientUuid,
@@ -179,7 +175,7 @@ export async function provisionRecipientKeyPair({
 
   const actionId = await getLitActionId();
   const pair = await generateUserKeyPair();
-  const publicKeySpki = await exportPublicKeySpkiBase64(pair.publicKey);
+  const iron = await exportPublicKeySpkiBase64(pair.publicKey);
   const pkcs8 = await exportPrivateKeyPkcs8Base64(pair.privateKey);
   const wrapped = await wrapPrivateKeyPkcs8(pkcs8, recipientUuid, actionId);
 
@@ -187,22 +183,22 @@ export async function provisionRecipientKeyPair({
     {
       recipientEmail,
       recipientUuid,
-      publicKeySpki,
-      privateKeyEnc: wrapped.privateKeyEnc,
-      privateKeyIv: wrapped.privateKeyIv,
-      privateKeySalt: wrapped.privateKeySalt,
+      iron,
+      thor: wrapped.thor,
+      hulk: wrapped.hulk,
+      venom: wrapped.venom,
     },
     token,
   );
 
   return {
-    publicKeySpki: data.publicKeySpki || publicKeySpki,
+    iron: data.iron || iron,
     created: !data.alreadyProvisioned,
   };
 }
 
 /**
- * Create RSA keys if missing. Private key wrapped with uuid + live list_actions id.
+ * Create RSA keys if missing. Private key wrapped with uuid + VITE_LIT_ACTION_ID.
  * Never regenerates or overwrites an existing public/private key pair.
  */
 const ensureKeyInflight = new Map();
@@ -217,7 +213,7 @@ export async function ensureUserKeyPair(auth, getLitActionId) {
 
   // Already known on this session — do not touch server keys.
   if (auth.hasPublicKey) {
-    return { publicKeySpki: null, created: false, skipped: true };
+    return { iron: null, created: false, skipped: true };
   }
 
   const inflightKey = String(auth.uuid);
@@ -229,23 +225,23 @@ export async function ensureUserKeyPair(auth, getLitActionId) {
     const { data: existing } = await api.getMyKeys(auth.token);
     if (hasCompleteKeyBundle(existing)) {
       return {
-        publicKeySpki: existing.publicKeySpki,
+        iron: existing.iron,
         created: false,
       };
     }
 
     const actionId = await getLitActionId();
     const pair = await generateUserKeyPair();
-    const publicKeySpki = await exportPublicKeySpkiBase64(pair.publicKey);
+    const iron = await exportPublicKeySpkiBase64(pair.publicKey);
     const pkcs8 = await exportPrivateKeyPkcs8Base64(pair.privateKey);
     const wrapped = await wrapPrivateKeyPkcs8(pkcs8, auth.uuid, actionId);
 
     const { data: registered } = await api.registerKeys(
       {
-        publicKeySpki,
-        privateKeyEnc: wrapped.privateKeyEnc,
-        privateKeyIv: wrapped.privateKeyIv,
-        privateKeySalt: wrapped.privateKeySalt,
+        iron,
+        thor: wrapped.thor,
+        hulk: wrapped.hulk,
+        venom: wrapped.venom,
       },
       auth.token,
     );
@@ -254,12 +250,12 @@ export async function ensureUserKeyPair(auth, getLitActionId) {
     if (registered?.alreadyExists) {
       const { data: again } = await api.getMyKeys(auth.token);
       return {
-        publicKeySpki: again.publicKeySpki || publicKeySpki,
+        iron: again.iron || iron,
         created: false,
       };
     }
 
-    return { publicKeySpki, created: true };
+    return { iron, created: true };
   })();
 
   ensureKeyInflight.set(inflightKey, work);
@@ -271,7 +267,7 @@ export async function ensureUserKeyPair(auth, getLitActionId) {
 }
 
 /**
- * Unlock private key from MongoDB using uuid + live Lit action id (list_actions).
+ * Unlock private key from MongoDB using uuid + VITE_LIT_ACTION_ID.
  */
 export async function loadPrivateKeyFromServer(auth, getLitActionId, packageActionId) {
   if (!auth?.uuid || !auth?.token) {
@@ -288,7 +284,7 @@ export async function loadPrivateKeyFromServer(auth, getLitActionId, packageActi
     );
   }
 
-  // Always fetch live action id; also try package action id as fallback.
+  // Env action id; also try package action id as fallback.
   const liveActionId = await getLitActionId();
   const candidates = [...new Set([liveActionId, packageActionId].filter(Boolean))];
 
@@ -296,9 +292,9 @@ export async function loadPrivateKeyFromServer(auth, getLitActionId, packageActi
   for (const actionId of candidates) {
     try {
       return await unwrapPrivateKey({
-        privateKeyEnc: data.privateKeyEnc,
-        privateKeyIv: data.privateKeyIv,
-        privateKeySalt: data.privateKeySalt,
+        thor: data.thor,
+        hulk: data.hulk,
+        venom: data.venom,
         actionId,
         uuid: auth.uuid,
       });

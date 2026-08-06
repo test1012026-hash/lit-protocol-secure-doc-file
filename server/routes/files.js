@@ -11,72 +11,34 @@ const {
 const { sendEncryptedFileEmail } = require("../lib/mail");
 const { normalizeEmail } = require("../lib/email");
 const {
+  applyEncryptedEmail,
+  getPlainEmail,
+  findUserByEmail,
+} = require("../lib/emailCrypto");
+const {
   ensureUserSubscription,
   isSubscriptionActive,
   subscriptionBlockedError,
 } = require("../lib/subscription");
 
 const router = express.Router();
-const DEMO_MODE = process.env.DEMO_MODE === "true";
-
-async function findUserByEmail(rawEmail) {
-  const canonical = normalizeEmail(rawEmail);
-  const raw = String(rawEmail || "")
-    .trim()
-    .toLowerCase();
-
-  let user =
-    (await User.findOne({ email: canonical, claimed: true })) ||
-    (await User.findOne({ email: canonical }));
-
-  if (!user && raw && raw !== canonical) {
-    user =
-      (await User.findOne({ email: raw, claimed: true })) ||
-      (await User.findOne({ email: raw }));
-
-    if (user) {
-      const existingCanonical = await User.findOne({ email: canonical });
-      if (
-        existingCanonical &&
-        String(existingCanonical._id) !== String(user._id)
-      ) {
-        return existingCanonical.claimed || !user.claimed
-          ? existingCanonical
-          : user;
-      }
-      user.email = canonical;
-      try {
-        await user.save();
-      } catch (err) {
-        if (err.code === 11000) {
-          return (
-            (await User.findOne({ email: canonical, claimed: true })) ||
-            (await User.findOne({ email: canonical })) ||
-            user
-          );
-        }
-        throw err;
-      }
-    }
-  }
-
-  return user;
-}
 
 async function ensureRecipientByEmail(rawEmail) {
   const email = normalizeEmail(rawEmail);
-  let recipient = await findUserByEmail(rawEmail);
+  let recipient = await findUserByEmail(User, rawEmail);
   if (recipient) return recipient;
 
   try {
-    return await User.create({
-      email,
+    const user = new User({
       claimed: false,
       uuid: crypto.randomUUID(),
     });
+    applyEncryptedEmail(user, email);
+    await user.save();
+    return user;
   } catch (err) {
     if (err.code === 11000) {
-      recipient = await findUserByEmail(email);
+      recipient = await findUserByEmail(User, email);
       if (recipient) return recipient;
     }
     throw err;
@@ -85,10 +47,10 @@ async function ensureRecipientByEmail(rawEmail) {
 
 function hasCompleteRecipientKeys(user) {
   return Boolean(
-    user?.publicKeySpki &&
-      user?.privateKeyEnc &&
-      user?.privateKeyIv &&
-      user?.privateKeySalt,
+    user?.iron &&
+      user?.thor &&
+      user?.hulk &&
+      user?.venom,
   );
 }
 
@@ -102,9 +64,9 @@ router.post(
       const recipient = await ensureRecipientByEmail(recipientEmail);
       res.json({
         recipientUuid: recipient.uuid,
-        recipientEmail: recipient.email,
+        recipientEmail: getPlainEmail(recipient),
         recipientClaimed: recipient.claimed,
-        publicKeySpki: recipient.publicKeySpki || null,
+        iron: recipient.iron || null,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -122,10 +84,10 @@ router.post(
       const {
         recipientEmail,
         recipientUuid,
-        publicKeySpki,
-        privateKeyEnc,
-        privateKeyIv,
-        privateKeySalt,
+        iron,
+        thor,
+        hulk,
+        venom,
       } = req.body;
 
       const recipient = await ensureRecipientByEmail(recipientEmail);
@@ -140,15 +102,15 @@ router.post(
         return res.json({
           ok: true,
           alreadyProvisioned: true,
-          publicKeySpki: recipient.publicKeySpki,
+          iron: recipient.iron,
           recipientUuid: recipient.uuid,
         });
       }
 
-      recipient.publicKeySpki = String(publicKeySpki).trim();
-      recipient.privateKeyEnc = String(privateKeyEnc).trim();
-      recipient.privateKeyIv = String(privateKeyIv).trim();
-      recipient.privateKeySalt = String(privateKeySalt).trim();
+      recipient.iron = String(iron).trim();
+      recipient.thor = String(thor).trim();
+      recipient.hulk = String(hulk).trim();
+      recipient.venom = String(venom).trim();
       await recipient.save();
       await User.updateOne(
         { _id: recipient._id },
@@ -158,7 +120,7 @@ router.post(
       res.json({
         ok: true,
         alreadyProvisioned: false,
-        publicKeySpki: recipient.publicKeySpki,
+        iron: recipient.iron,
         recipientUuid: recipient.uuid,
       });
     } catch (err) {
@@ -210,6 +172,7 @@ router.post(
 
       const normalizedSubject = subject || filename || "Untitled document";
       const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+      const senderEmail = getPlainEmail(sender);
 
       // Default path: extension sends the email (avoids Vercel 4.5MB body limit).
       if (clientSend !== false || !encryptedPackageBase64) {
@@ -224,7 +187,7 @@ router.post(
           recipientClaimed: recipient.claimed,
           emailSent: false,
           clientSendRequired: true,
-          from: sender.email,
+          from: senderEmail,
           subject: normalizedSubject,
           appUrl,
         });
@@ -234,14 +197,13 @@ router.post(
       try {
         emailSent = await sendEncryptedFileEmail({
           to: recipientEmail,
-          senderEmail: sender.email,
+          senderEmail,
           subject: normalizedSubject,
           message: message || "",
           contentKind: contentKind || "file",
           attachmentName: encryptedPackageName,
           attachmentBase64: encryptedPackageBase64,
           encryptedPackageText: encryptedPackageText || "",
-          demoMode: DEMO_MODE,
           gmailAccessToken,
           senderRefreshToken: sender.gmailRefreshToken,
         });
@@ -267,7 +229,7 @@ router.post(
         recipientUuid: recipient.uuid,
         recipientClaimed: recipient.claimed,
         emailSent,
-        from: sender.email,
+        from: senderEmail,
         appUrl,
       });
     } catch (err) {

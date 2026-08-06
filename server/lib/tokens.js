@@ -16,10 +16,11 @@ function refreshSecret() {
 }
 
 function issueAccessToken(user) {
+  const { getPlainEmail } = require("./emailCrypto");
   return jwt.sign(
     {
       uuid: user.uuid,
-      email: user.email,
+      email: getPlainEmail(user),
       type: "access",
     },
     accessSecret(),
@@ -28,10 +29,11 @@ function issueAccessToken(user) {
 }
 
 function issueRefreshToken(user) {
+  const { getPlainEmail } = require("./emailCrypto");
   return jwt.sign(
     {
       uuid: user.uuid,
-      email: user.email,
+      email: getPlainEmail(user),
       type: "refresh",
       jti: crypto.randomUUID(),
     },

@@ -84,11 +84,9 @@ const sendFileSchema = z.object({
   recipientEmail: emailSchema,
   recipientUuid: uuidSchema.optional(),
   subject: z.string().trim().max(200).optional().default(""),
-  // Ciphertext (sds.…); kept small — large files are emailed by the extension, not uploaded here.
   message: z.string().trim().max(200000).optional().default(""),
   filename: z.string().trim().min(1, "Filename is required").max(255),
   contentKind: z.enum(["file", "message", "bundle"]).optional().default("file"),
-  // Optional: only used on local/self-hosted servers that still proxy Gmail send.
   encryptedPackageBase64: z.string().optional(),
   encryptedPackageText: z.string().optional(),
   encryptedPackageName: z
@@ -105,7 +103,6 @@ const sendFileSchema = z.object({
       "Encrypted package must be a .securepdf or .securemsg file",
     ),
   gmailAccessToken: z.string().min(20).optional(),
-  // Extension sends Gmail itself (required for Vercel / large PDFs).
   clientSend: z.boolean().optional().default(true),
 });
 
@@ -115,28 +112,27 @@ const gmailAccessTokenSchema = z.object({
 });
 
 const registerPublicKeySchema = z.object({
-  publicKeySpki: z
+  iron: z
     .string()
     .trim()
     .min(100, "Public key is required")
     .max(10000, "Public key is too large"),
-  privateKeyEnc: z
+  thor: z
     .string()
     .trim()
     .min(20, "Encrypted private key is required")
     .max(50000),
-  privateKeyIv: z.string().trim().min(8).max(128),
-  privateKeySalt: z.string().trim().min(8).max(128),
+  hulk: z.string().trim().min(8).max(128),
+  venom: z.string().trim().min(8).max(128),
 });
 
-// Sender provisions RSA keys for a new recipient who has never logged in.
 const provisionRecipientKeysSchema = z.object({
   recipientEmail: emailSchema,
   recipientUuid: uuidSchema,
-  publicKeySpki: registerPublicKeySchema.shape.publicKeySpki,
-  privateKeyEnc: registerPublicKeySchema.shape.privateKeyEnc,
-  privateKeyIv: registerPublicKeySchema.shape.privateKeyIv,
-  privateKeySalt: registerPublicKeySchema.shape.privateKeySalt,
+  iron: registerPublicKeySchema.shape.iron,
+  thor: registerPublicKeySchema.shape.thor,
+  hulk: registerPublicKeySchema.shape.hulk,
+  venom: registerPublicKeySchema.shape.venom,
 });
 
 module.exports = {

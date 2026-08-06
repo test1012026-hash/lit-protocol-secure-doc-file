@@ -7,13 +7,20 @@ const PasswordReset = require("../models/PasswordReset");
 const { sendResetEmail } = require("../lib/mail");
 const { normalizeEmail } = require("../lib/email");
 const {
-  getGmailAuthUrl,
+  applyEncryptedEmail,
+  getPlainEmail,
+  findUserByEmail,
+  hashEmail,
+  encryptEmail,
+} = require("../lib/emailCrypto");
+const {
+  // getGmailAuthUrl,
   exchangeCodeForTokens,
   getOAuthClient,
-  createConnectState,
+  // createConnectState,
   consumeConnectState,
-  getGoogleOAuthAudience,
-  verifyGoogleIdToken,
+  // getGoogleOAuthAudience,
+  // verifyGoogleIdToken,
   getGmailAccessTokenFromRefresh,
 } = require("../lib/gmailAuth");
 const {
@@ -76,10 +83,10 @@ function userPayload(user, tokens) {
     token: tokens.token,
     refreshToken: tokens.refreshToken,
     uuid: user.uuid,
-    email: user.email,
+    email: getPlainEmail(user),
     hasPassword: Boolean(user.passwordHash),
     gmailConnected: Boolean(user.gmailRefreshToken),
-    hasPublicKey: Boolean(user.publicKeySpki && user.privateKeyEnc),
+    hasPublicKey: Boolean(user.iron && user.thor),
     termsAndConditions: Boolean(user.termsAndConditions),
     ...subscriptionPayload(user),
   };
@@ -107,7 +114,7 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
     const email = normalizeEmail(req.body.email);
     const { password } = req.body;
 
-    let user = await User.findOne({ email });
+    let user = await findUserByEmail(User, email);
     if (user?.claimed)
       return res
         .status(409)
@@ -115,16 +122,17 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
     if (user) {
+      applyEncryptedEmail(user, email);
       user.passwordHash = passwordHash;
       user.claimed = true;
       user.termsAndConditions = true;
     } else {
       user = new User({
-        email,
         passwordHash,
         claimed: true,
         termsAndConditions: true,
       });
+      applyEncryptedEmail(user, email);
     }
     await finalizeClaimedUser(user);
 
@@ -139,10 +147,7 @@ router.post("/login", validateBody(loginSchema), async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
     const { password } = req.body;
-    const user = await User.findOne({
-      email,
-      claimed: true,
-    });
+    const user = await findUserByEmail(User, email, { claimed: true });
     if (!user || !user.passwordHash)
       return res.status(401).json({ error: "Invalid credentials" });
 
@@ -164,14 +169,13 @@ async function upsertGoogleUser(
 ) {
   const email = normalizeEmail(payload.email);
 
-  let user = await User.findOne({ email });
+  let user = await findUserByEmail(User, email);
   if (!user) {
     const raw = String(payload.email || "")
       .trim()
       .toLowerCase();
     if (raw && raw !== email) {
-      user = await User.findOne({ email: raw });
-      if (user) user.email = email;
+      user = await findUserByEmail(User, raw);
     }
   }
 
@@ -198,12 +202,13 @@ async function upsertGoogleUser(
 
   if (!user) {
     user = new User({
-      email,
       googleId: payload.sub,
       claimed: true,
       termsAndConditions: Boolean(acceptTerms),
     });
+    applyEncryptedEmail(user, email);
   } else {
+    applyEncryptedEmail(user, email);
     user.googleId = payload.sub;
     user.claimed = true;
     if (acceptTerms) user.termsAndConditions = true;
@@ -310,7 +315,7 @@ router.post(
     try {
       const email = normalizeEmail(req.body.email);
 
-      const user = await User.findOne({ email, claimed: true });
+      const user = await findUserByEmail(User, email, { claimed: true });
       if (!user)
         return res
           .status(404)
@@ -319,10 +324,16 @@ router.post(
       const token = generateResetToken();
       const tokenHash = hashResetToken(token);
       const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+      const emailHash = hashEmail(email);
 
       await PasswordReset.findOneAndUpdate(
-        { email },
-        { email, tokenHash, expiresAt },
+        { emailHash },
+        {
+          email: encryptEmail(email),
+          emailHash,
+          tokenHash,
+          expiresAt,
+        },
         { upsert: true, new: true },
       );
 
@@ -345,7 +356,12 @@ router.get(
     try {
       const email = normalizeEmail(req.query.email);
       const { token } = req.query;
-      const record = await PasswordReset.findOne({ email });
+      const emailHash = hashEmail(email);
+      let record = await PasswordReset.findOne({ emailHash });
+      if (!record) {
+        // Legacy plaintext rows
+        record = await PasswordReset.findOne({ email });
+      }
 
       if (!record || record.tokenHash !== hashResetToken(token)) {
         return res.status(400).json({
@@ -356,7 +372,7 @@ router.get(
       }
 
       if (record.expiresAt < new Date()) {
-        await PasswordReset.deleteOne({ email });
+        await PasswordReset.deleteOne({ _id: record._id });
         return res.status(400).json({
           valid: false,
           expired: true,
@@ -386,21 +402,25 @@ router.post(
       const email = normalizeEmail(req.body.email);
       const { token, password } = req.body;
 
-      const record = await PasswordReset.findOne({ email });
+      const emailHash = hashEmail(email);
+      let record = await PasswordReset.findOne({ emailHash });
+      if (!record) {
+        record = await PasswordReset.findOne({ email });
+      }
       if (!record || record.tokenHash !== hashResetToken(token)) {
         return res.status(400).json({
           error: "This reset link is invalid. Please request a new one.",
         });
       }
       if (record.expiresAt < new Date()) {
-        await PasswordReset.deleteOne({ email });
+        await PasswordReset.deleteOne({ _id: record._id });
         return res.status(400).json({
           error:
             "This reset link has expired (links are valid for 30 minutes). Please request a new one.",
         });
       }
 
-      const user = await User.findOne({ email, claimed: true });
+      const user = await findUserByEmail(User, email, { claimed: true });
       if (!user)
         return res
           .status(404)
@@ -408,7 +428,7 @@ router.post(
 
       user.passwordHash = await bcrypt.hash(password, 12);
       await user.save();
-      await PasswordReset.deleteOne({ email });
+      await PasswordReset.deleteOne({ _id: record._id });
 
       await ensureUserSubscription(user);
       const tokens = await attachAuthTokens(user);
@@ -485,31 +505,31 @@ router.post(
       if (!user) return res.status(404).json({ error: "User not found" });
 
       if (
-        user.publicKeySpki &&
-        user.privateKeyEnc &&
-        user.privateKeyIv &&
-        user.privateKeySalt
+        user.iron &&
+        user.thor &&
+        user.hulk &&
+        user.venom
       ) {
         return res.json({
           ok: true,
           hasPublicKey: true,
           alreadyExists: true,
           uuid: user.uuid,
-          email: user.email,
+          email: getPlainEmail(user),
         });
       }
 
       const {
-        publicKeySpki,
-        privateKeyEnc,
-        privateKeyIv,
-        privateKeySalt,
+        iron,
+        thor,
+        hulk,
+        venom,
       } = req.body;
 
-      user.publicKeySpki = String(publicKeySpki).trim();
-      user.privateKeyEnc = String(privateKeyEnc).trim();
-      user.privateKeyIv = String(privateKeyIv).trim();
-      user.privateKeySalt = String(privateKeySalt).trim();
+      user.iron = String(iron).trim();
+      user.thor = String(thor).trim();
+      user.hulk = String(hulk).trim();
+      user.venom = String(venom).trim();
       await user.save();
       // Drop legacy keyActionId if it still exists in older documents.
       await User.updateOne(
@@ -522,7 +542,7 @@ router.post(
         hasPublicKey: true,
         alreadyExists: false,
         uuid: user.uuid,
-        email: user.email,
+        email: getPlainEmail(user),
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -536,61 +556,61 @@ router.get("/keys/me", authMiddleware, async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found" });
 
     const hasKeys = Boolean(
-      user.publicKeySpki &&
-        user.privateKeyEnc &&
-        user.privateKeyIv &&
-        user.privateKeySalt,
+      user.iron &&
+        user.thor &&
+        user.hulk &&
+        user.venom,
     );
 
     res.json({
       hasPublicKey: hasKeys,
-      publicKeySpki: user.publicKeySpki || null,
-      privateKeyEnc: user.privateKeyEnc || null,
-      privateKeyIv: user.privateKeyIv || null,
-      privateKeySalt: user.privateKeySalt || null,
+      iron: user.iron || null,
+      thor: user.thor || null,
+      hulk: user.hulk || null,
+      venom: user.venom || null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post("/google/refresh", authMiddleware, async (req, res) => {
-  try {
-    const { code, redirectUri } = req.body;
-    if (!code) {
-      return res.status(400).json({ error: "Google authorization code is required" });
-    }
+// router.post("/google/refresh", authMiddleware, async (req, res) => {
+//   try {
+//     const { code, redirectUri } = req.body;
+//     if (!code) {
+//       return res.status(400).json({ error: "Google authorization code is required" });
+//     }
 
-    const tokens = await exchangeCodeForTokens(code, redirectUri);
-    if (!tokens.id_token) {
-      return res.status(401).json({ error: "Google did not return an id_token" });
-    }
+//     const tokens = await exchangeCodeForTokens(code, redirectUri);
+//     if (!tokens.id_token) {
+//       return res.status(401).json({ error: "Google did not return an id_token" });
+//     }
 
-    const payload = await verifyGoogleIdToken(tokens.id_token);
-    const user = await User.findOne({ uuid: req.user.uuid });
-    if (!user) return res.status(404).json({ error: "User not found" });
+//     const payload = await verifyGoogleIdToken(tokens.id_token);
+//     const user = await User.findOne({ uuid: req.user.uuid });
+//     if (!user) return res.status(404).json({ error: "User not found" });
 
-    if (normalizeEmail(payload.email) !== normalizeEmail(user.email)) {
-      return res.status(403).json({
-        error: "Google account does not match your logged-in email.",
-      });
-    }
+//     if (normalizeEmail(payload.email) !== getPlainEmail(user)) {
+//       return res.status(403).json({
+//         error: "Google account does not match your logged-in email.",
+//       });
+//     }
 
-    if (tokens.refresh_token) {
-      user.gmailRefreshToken = tokens.refresh_token;
-    }
-    user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
-    await user.save();
+//     if (tokens.refresh_token) {
+//       user.gmailRefreshToken = tokens.refresh_token;
+//     }
+//     user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
+//     await user.save();
 
-    res.json({
-      googleIdToken: tokens.id_token,
-      gmailConnected: Boolean(user.gmailRefreshToken),
-      scope: user.gmailScopes,
-    });
-  } catch (err) {
-    res.status(401).json({ error: err.message });
-  }
-});
+//     res.json({
+//       googleIdToken: tokens.id_token,
+//       gmailConnected: Boolean(user.gmailRefreshToken),
+//       scope: user.gmailScopes,
+//     });
+//   } catch (err) {
+//     res.status(401).json({ error: err.message });
+//   }
+// });
 
 router.post(
   "/gmail/access-token",
@@ -635,17 +655,17 @@ router.post(
   },
 );
 
-router.post("/gmail/disconnect", authMiddleware, async (req, res) => {
-  try {
-    await User.updateOne(
-      { uuid: req.user.uuid },
-      { $unset: { gmailRefreshToken: 1 }, $set: { gmailScopes: "" } },
-    );
-    res.json({ gmailConnected: false });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// router.post("/gmail/disconnect", authMiddleware, async (req, res) => {
+//   try {
+//     await User.updateOne(
+//       { uuid: req.user.uuid },
+//       { $unset: { gmailRefreshToken: 1 }, $set: { gmailScopes: "" } },
+//     );
+//     res.json({ gmailConnected: false });
+//   } catch (err) {
+//     res.status(500).json({ error: err.message });
+//   }
+// });
 
 router.get("/gmail/status", authMiddleware, async (req, res) => {
   try {
@@ -693,7 +713,7 @@ router.post("/gmail/send-token", authMiddleware, async (req, res) => {
       );
       res.json({
         accessToken,
-        from: user.email,
+        from: getPlainEmail(user),
         scope: user.gmailScopes || "",
         appUrl: (process.env.APP_URL || "").replace(/\/$/, ""),
       });
@@ -734,7 +754,7 @@ router.post("/gmail/mailbox-token", authMiddleware, async (req, res) => {
       );
       res.json({
         accessToken,
-        email: user.email,
+        email: getPlainEmail(user),
         scope: user.gmailScopes || "",
       });
     } catch (tokenErr) {
@@ -756,18 +776,18 @@ router.post("/gmail/mailbox-token", authMiddleware, async (req, res) => {
   }
 });
 
-router.get("/gmail/connect", authMiddleware, async (req, res) => {
-  try {
-    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
-    if (!user) return res.status(404).json({ error: "User not found" });
+// router.get("/gmail/connect", authMiddleware, async (req, res) => {
+//   try {
+//     const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+//     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const state = await createConnectState(user.uuid);
-    const { url, redirectUri, clientId } = getGmailAuthUrl(state);
-    res.json({ url, redirectUri, clientId });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+//     const state = await createConnectState(user.uuid);
+//     const { url, redirectUri, clientId } = getGmailAuthUrl(state);
+//     res.json({ url, redirectUri, clientId });
+//   } catch (err) {
+//     res.status(500).json({ error: err.message });
+//   }
+// });
 
 router.get("/gmail/callback", async (req, res) => {
   const fail = (message) =>
@@ -806,20 +826,20 @@ router.get("/gmail/callback", async (req, res) => {
 
     if (
       googleEmail &&
-      normalizeEmail(googleEmail) !== normalizeEmail(user.email)
+      normalizeEmail(googleEmail) !== getPlainEmail(user)
     ) {
       return fail(
-        `Google account (${googleEmail}) must match your login (${user.email}).`,
+        `Google account (${googleEmail}) must match your login (${getPlainEmail(user)}).`,
       );
     }
 
     user.gmailRefreshToken = tokens.refresh_token;
     user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
-    if (googleEmail) user.email = normalizeEmail(googleEmail);
+    if (googleEmail) applyEncryptedEmail(user, googleEmail);
     await user.save();
 
     res.send(
-      `<html><body style="font-family:system-ui;padding:24px"><h2>Gmail connected</h2><p>Sends will appear From: <b>${user.email}</b></p></body></html>`,
+      `<html><body style="font-family:system-ui;padding:24px"><h2>Gmail connected</h2><p>Sends will appear From: <b>${getPlainEmail(user)}</b></p></body></html>`,
     );
   } catch (err) {
     console.error("Gmail callback error:", err);

@@ -1,9 +1,5 @@
 import {
-  DEMO_MODE,
-  GOOGLE_CLIENT_ID,
-  LIT_API_BASE,
-  LIT_API_KEY,
-  LIT_PKP_ID,
+  LIT_ACTION_ID
 } from "./config";
 import {
   hybridDecryptWithPrivateKey,
@@ -51,7 +47,6 @@ function readUint32BE(view, offset) {
   );
 }
 
-/** Compact binary attachment (no nested base64) so ~25MB PDFs fit Gmail's 25MB cap. */
 function encodeSdsbAttachment(payload, cipherBytes) {
   const meta = {
     version: 4,
@@ -69,11 +64,11 @@ function encodeSdsbAttachment(payload, cipherBytes) {
   };
   const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
   const out = new Uint8Array(4 + 1 + 4 + metaBytes.length + 4 + cipherBytes.length);
-  out[0] = 0x53; // S
-  out[1] = 0x44; // D
-  out[2] = 0x53; // S
-  out[3] = 0x42; // B
-  out[4] = 1; // format version
+  out[0] = 0x53;
+  out[1] = 0x44;
+  out[2] = 0x53;
+  out[3] = 0x42;
+  out[4] = 1;
   writeUint32BE(out, 5, metaBytes.length);
   out.set(metaBytes, 9);
   const cipherOffset = 9 + metaBytes.length;
@@ -125,9 +120,6 @@ function parseSdsbAttachment(bytes) {
   };
 }
 
-/**
- * Parse uploaded attachment bytes (binary SDSB or legacy JSON).
- */
 export function parseEncryptedPackageFromBytes(bytes) {
   const view =
     bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
@@ -138,7 +130,6 @@ export function parseEncryptedPackageFromBytes(bytes) {
   const sdsb = parseSdsbAttachment(view);
   if (sdsb) return sdsb;
 
-  // Legacy JSON / sds. text packages
   return parseEncryptedPackage(new TextDecoder().decode(view));
 }
 
@@ -198,136 +189,31 @@ async function decryptWithUuid(ciphertext, iv, recipientUuid) {
   return new Uint8Array(plain);
 }
 
-async function callLitAction(code, jsParams) {
-  const res = await fetch(`${LIT_API_BASE}/lit_action`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Api-Key": LIT_API_KEY,
-    },
-    body: JSON.stringify({ code, js_params: jsParams }),
-  });
-
-  if (res.status === 402) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(
-      `Lit account has insufficient credits (402). Add funds in the Chipotle Dashboard. Details: ${errBody}`,
-    );
-  }
-
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(`Lit Action HTTP ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  if (data.has_error) {
-    throw new Error(data.logs || "Lit Action execution failed");
-  }
-
-  if (typeof data.response === "string") {
-    try {
-      return JSON.parse(data.response);
-    } catch {
-      return data.response;
-    }
-  }
-  return data.response;
-}
-
-/**
- * Fetch registered Lit Action IDs from Chipotle list_actions.
- */
-export async function listLitActions() {
-  if (!LIT_API_KEY) {
-    throw new Error("VITE_LIT_API_KEY is required to list Lit actions.");
-  }
-
-  const fetchPage = async (pageNumber) => {
-    const res = await fetch(
-      `${LIT_API_BASE}/list_actions?page_number=${pageNumber}&page_size=10`,
-      {
-        method: "GET",
-        headers: {
-          accept: "application/json",
-          "X-Api-Key": LIT_API_KEY,
-        },
-      },
-    );
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      throw new Error(`list_actions HTTP ${res.status}: ${errBody}`);
-    }
-
-    const data = await res.json();
-    return Array.isArray(data)
-      ? data
-      : Array.isArray(data?.actions)
-        ? data.actions
-        : [];
-  };
-
-  const first = (await fetchPage(0)).filter((a) => a?.id);
-  if (first.length) return first;
-
-  // Some dashboards use 1-based paging (as in the Chipotle curl example).
-  return (await fetchPage(1)).filter((a) => a?.id);
-}
-
-/**
- * Get the Lit Action ID used for encrypt/decrypt binding.
- * Prefer a named action, otherwise the first registered action.
- */
 export async function getLitActionId() {
-  const actions = await listLitActions();
-  if (!actions.length) {
-    throw new Error(
-      "No Lit actions found. Register an IPFS action in the Chipotle Dashboard first.",
-    );
+  if (!LIT_ACTION_ID) {
+    throw new Error("VITE_LIT_ACTION_ID is required in the extension env.");
   }
-
-  const named =
-    actions.find((a) => /encrypt|secure|demo/i.test(String(a.name || ""))) ||
-    actions[0];
-  return named.id;
+  return LIT_ACTION_ID;
 }
 
 async function assertActionIdAllowed(actionId) {
   if (!actionId) {
     throw new Error("Encrypted package is missing Lit action id.");
   }
-
-  try {
-    const actions = await listLitActions();
-    const ok = actions.some(
-      (a) => String(a.id).toLowerCase() === String(actionId).toLowerCase(),
+  if (!LIT_ACTION_ID) {
+    throw new Error("VITE_LIT_ACTION_ID is required in the extension env.");
+  }
+  if (String(actionId).toLowerCase() !== String(LIT_ACTION_ID).toLowerCase()) {
+    throw new Error(
+      "Lit action id in this file does not match VITE_LIT_ACTION_ID. Re-send the file.",
     );
-    if (!ok) {
-      throw new Error(
-        "Lit action id is not registered on this account. Re-send the file or add the action in the Dashboard.",
-      );
-    }
-  } catch (err) {
-    // If Lit list_actions is unavailable, still allow RSA hybrid decrypt —
-    // action id remains in the package for audit, keys unlock via UUID+actionId.
-    if (/list_actions|LIT_API_KEY|HTTP|fetch|network/i.test(String(err.message || ""))) {
-      console.warn("list_actions check skipped:", err.message);
-      return;
-    }
-    throw err;
   }
 }
 
-/**
- * Encrypt message/file bytes for a recipient.
- * Demo mode: per-email AES key wrapped with recipient RSA public key (+ Lit action id).
- * Lit mode: UUID-AES then Lit PKP encrypt.
- */
 export async function encryptForRecipient(
   messageBytes,
   recipientUuid,
-  { publicKeySpki } = {},
+  { iron } = {},
 ) {
   if (!recipientUuid) {
     throw new Error("Recipient UUID is required for encryption");
@@ -340,16 +226,14 @@ export async function encryptForRecipient(
 
   const recipientUuidHash = await sha256Hex(recipientUuid);
 
-  // Demo: public-key encrypt (new AES key every mail) + Lit action id binding.
-  if (DEMO_MODE) {
-    if (!publicKeySpki) {
+    if (!iron) {
       throw new Error(
         "Recipient has no public key. Re-send so keys can be created for them.",
       );
     }
 
     const actionId = await getLitActionId();
-    const hybrid = await hybridEncryptForPublicKey(bytes, publicKeySpki);
+    const hybrid = await hybridEncryptForPublicKey(bytes, iron);
 
     return {
       ciphertext: hybrid.ciphertext,
@@ -360,42 +244,8 @@ export async function encryptForRecipient(
       mode: "demo",
       keyScheme: "rsa-oaep+aes-gcm",
     };
-  }
-
-  // Lit mode: UUID-AES then Lit encrypt.
-  const uuidEncrypted = await encryptWithUuid(bytes, recipientUuid);
-  const litPayload = JSON.stringify({
-    ciphertext: uuidEncrypted.ciphertext,
-    iv: uuidEncrypted.iv,
-  });
-
-  const actionId = await getLitActionId();
-  const code = `
-    async function main({ pkpId, message }) {
-      const ciphertext = await Lit.Actions.Encrypt({ pkpId, message });
-      return { ciphertext };
-    }
-  `;
-
-  const result = await callLitAction(code, {
-    pkpId: LIT_PKP_ID,
-    message: litPayload,
-  });
-
-  return {
-    ciphertext: result.ciphertext,
-    iv: null,
-    wrappedKey: null,
-    recipientUuidHash,
-    actionId,
-    mode: "lit",
-  };
 }
 
-/**
- * Build plaintext bytes for one encrypted package.
- * Includes encrypted message text and/or PDF — at least one must be present.
- */
 export async function buildContentPayloadBytes({ message, file }) {
   const raw = String(message || "").trim();
   const textOnly = raw
@@ -428,7 +278,6 @@ export function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
   const kind = encryptedPackage.kind;
   const filename = encryptedPackage.filename || "";
 
-  // Unified JSON payload (message-only, file-only, or legacy bundle)
   if (
     kind === "bundle" ||
     kind === "message" ||
@@ -454,7 +303,6 @@ export function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
     }
   }
 
-  // Legacy message package (raw text bytes)
   if (
     kind === "message" ||
     mimeType.startsWith("text/") ||
@@ -466,7 +314,6 @@ export function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
     };
   }
 
-  // Legacy PDF / file package
   return {
     message: null,
     file: {
@@ -518,13 +365,10 @@ export async function buildEncryptedPackage({
     attachmentBytes: null,
   };
 
-  // File attachments: binary package (raw ciphertext) so 25MB PDFs fit Gmail's 25MB limit.
-  // Message packages stay small JSON/base64.
   if (kind === "file" && ciphertext) {
     try {
       const cipherBytes = base64ToBytes(ciphertext);
       result.attachmentBytes = encodeSdsbAttachment(payload, cipherBytes);
-      // Prefer binary for Gmail; keep base64 only as legacy fallback for tiny files.
       result.base64 = null;
     } catch {
       // Keep JSON base64 fallback if decode fails.
@@ -534,9 +378,6 @@ export async function buildEncryptedPackage({
   return result;
 }
 
-/**
- * Pack package fields into one ciphertext string the user can copy/paste.
- */
 export function toCipherText(pkg) {
   const raw = JSON.stringify({
     v: 3,
@@ -581,11 +422,6 @@ function tryParseSdsBase64(b64) {
   }
 }
 
-/**
- * Extract a clean sds.* token from email/HTML body.
- * Stops at base64 padding (=) so trailing instructions like
- * "Copy and paste the Message ciphertext..." are not glued on.
- */
 export function extractSdsCiphertext(text) {
   const raw = String(text || "");
   const match = /sds\./i.exec(raw);
@@ -634,19 +470,16 @@ export function parseEncryptedPackage(packageText) {
     throw new Error("Encrypted package is empty.");
   }
 
-  // Prefer a clean sds token (strips trailing email instructions).
   const extracted = extractSdsCiphertext(trimmed);
   if (extracted) {
     trimmed = extracted;
   } else {
-    // Email clients often insert spaces/newlines into long ciphertext.
     const compact = trimmed.replace(/\s+/g, "");
     if (compact.startsWith("sds.")) {
       trimmed = compact;
     }
   }
 
-  // Preferred: single ciphertext token (sds.<base64>)
   if (trimmed.startsWith("sds.")) {
     try {
       const raw = new TextDecoder().decode(base64ToBytes(trimmed.slice(4)));
@@ -662,7 +495,6 @@ export function parseEncryptedPackage(packageText) {
     );
   }
 
-  // Legacy SDS2|… token
   if (trimmed.startsWith("SDS2|")) {
     const parts = trimmed.split("|");
     if (parts.length < 6) {
@@ -681,7 +513,6 @@ export function parseEncryptedPackage(packageText) {
     throw new Error("Invalid encrypted message token.");
   }
 
-  // Full JSON package (from attachment file)
   if (trimmed.startsWith("{")) {
     let payload;
     try {
@@ -703,15 +534,14 @@ export function parseEncryptedPackage(packageText) {
     return payload;
   }
 
-  // Try bare base64 ciphertext blob (same payload as sds. without prefix)
   try {
     const raw = new TextDecoder().decode(base64ToBytes(trimmed));
     if (raw.startsWith("{")) {
       const parsed = packageFromCipherPayload(JSON.parse(raw));
       if (parsed) return parsed;
     }
-  } catch {
-    // ignore
+  } catch(err) {
+    console.error("Invalid encrypted package JSON.",err);
   }
 
   throw new Error(
@@ -719,10 +549,6 @@ export function parseEncryptedPackage(packageText) {
   );
 }
 
-/**
- * Decrypt: demo uses MongoDB private key unlocked by uuid+Lit action id;
- * Lit mode uses Google + Lit + UUID-AES.
- */
 export async function decryptForRecipient({
   encryptedPackage,
   recipientUuid,
@@ -740,8 +566,6 @@ export async function decryptForRecipient({
     );
   }
 
-  // Demo: unlock RSA private key from MongoDB, unwrap per-mail AES key.
-  if (encryptedPackage.mode === "demo" || DEMO_MODE) {
     if (!encryptedPackage.iv) {
       throw new Error("Encrypted file is missing IV.");
     }
@@ -781,57 +605,10 @@ export async function decryptForRecipient({
       }
     }
 
-    // Legacy demo packages (UUID-only, no wrappedKey).
     return decryptWithUuid(
       encryptedPackage.ciphertext,
       encryptedPackage.iv,
       recipientUuid,
     );
-  }
 
-  if (encryptedPackage.actionId) {
-    await assertActionIdAllowed(encryptedPackage.actionId);
-  }
-
-  const code = `
-    async function main({ pkpId, ciphertext, googleIdToken, googleClientId }) {
-      try {
-        const res = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + googleIdToken);
-        const payload = await res.json();
-
-        const authorized = !!payload.email && payload.aud === googleClientId;
-
-        if (!authorized) {
-          return { authorized: false };
-        }
-
-        const plaintext = await Lit.Actions.Decrypt({ pkpId, ciphertext });
-        return { authorized: true, plaintext };
-      } catch (e) {
-        return { authorized: false, error: String(e) };
-      }
-    }
-  `;
-
-  const result = await callLitAction(code, {
-    pkpId: LIT_PKP_ID,
-    ciphertext: encryptedPackage.ciphertext,
-    googleIdToken,
-    googleClientId: GOOGLE_CLIENT_ID,
-  });
-
-  if (!result?.authorized) {
-    throw new Error(
-      result?.error
-        ? `Not authorized: ${result.error}`
-        : "Not authorized to decrypt this file",
-    );
-  }
-
-  const inner =
-    typeof result.plaintext === "string"
-      ? JSON.parse(result.plaintext)
-      : result.plaintext;
-
-  return decryptWithUuid(inner.ciphertext, inner.iv, recipientUuid);
 }

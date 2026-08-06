@@ -6,7 +6,6 @@ import {
   getLitActionId,
 } from "../lib/lit";
 import { api } from "../lib/api";
-import { DEMO_MODE } from "../lib/config";
 import {
   isEmptyRichText,
   parseOrThrow,
@@ -48,18 +47,18 @@ export default function SendFile({ auth }) {
       auth.token,
     );
 
-    let publicKeySpki = recipient.publicKeySpki || null;
-    if (DEMO_MODE && !publicKeySpki) {
+    let iron = recipient.iron || null;
+    if (!iron) {
       const provisioned = await provisionRecipientKeyPair({
         recipientEmail,
         recipientUuid: recipient.recipientUuid,
         token: auth.token,
         getLitActionId,
       });
-      publicKeySpki = provisioned.publicKeySpki;
+      iron = provisioned.iron;
     }
 
-    if (DEMO_MODE && !publicKeySpki) {
+    if (!iron) {
       throw new Error(
         `Could not create a public key for ${recipientEmail}. Try again.`,
       );
@@ -80,7 +79,7 @@ export default function SendFile({ auth }) {
       const encryptedMessage = await encryptForRecipient(
         messageBytes,
         recipient.recipientUuid,
-        { publicKeySpki },
+        { iron },
       );
       const messagePackage = await buildEncryptedPackage({
         ciphertext: encryptedMessage.ciphertext,
@@ -110,7 +109,7 @@ export default function SendFile({ auth }) {
       const encryptedFile = await encryptForRecipient(
         fileBytes,
         recipient.recipientUuid,
-        { publicKeySpki },
+        { iron },
       );
       const packageName =
         values.file.name.replace(/\.[^./\\]+$/, "") || "document";

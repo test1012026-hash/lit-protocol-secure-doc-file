@@ -35,17 +35,17 @@ function getOAuthClient() {
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-async function createConnectState(uuid) {
-  const token = crypto.randomBytes(24).toString("hex");
-  await User.updateOne(
-    { uuid },
-    {
-      gmailConnectState: token,
-      gmailConnectStateExpires: new Date(Date.now() + STATE_TTL_MS),
-    },
-  );
-  return token;
-}
+// async function createConnectState(uuid) {
+//   const token = crypto.randomBytes(24).toString("hex");
+//   await User.updateOne(
+//     { uuid },
+//     {
+//       gmailConnectState: token,
+//       gmailConnectStateExpires: new Date(Date.now() + STATE_TTL_MS),
+//     },
+//   );
+//   return token;
+// }
 
 async function consumeConnectState(token) {
   const user = await User.findOne({ gmailConnectState: token });
@@ -63,24 +63,24 @@ async function consumeConnectState(token) {
   return user.uuid;
 }
 
-function getGmailAuthUrl(state) {
-  const { redirectUri, clientId } = getOAuthConfig();
-  const client = getOAuthClient();
-  const url = client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    include_granted_scopes: true,
-    scope: [GMAIL_SEND_SCOPE, USERINFO_EMAIL_SCOPE, USERINFO_PROFILE_SCOPE],
-    state,
-    redirect_uri: redirectUri,
-  });
+// function getGmailAuthUrl(state) {
+//   const { redirectUri, clientId } = getOAuthConfig();
+//   const client = getOAuthClient();
+//   const url = client.generateAuthUrl({
+//     access_type: "offline",
+//     prompt: "consent",
+//     include_granted_scopes: true,
+//     scope: [GMAIL_SEND_SCOPE, USERINFO_EMAIL_SCOPE, USERINFO_PROFILE_SCOPE],
+//     state,
+//     redirect_uri: redirectUri,
+//   });
 
-  if (!url.startsWith("https://accounts.google.com/")) {
-    throw new Error("Generated OAuth URL is invalid");
-  }
+//   if (!url.startsWith("https://accounts.google.com/")) {
+//     throw new Error("Generated OAuth URL is invalid");
+//   }
 
-  return { url, redirectUri, clientId };
-}
+//   return { url, redirectUri, clientId };
+// }
 
 async function exchangeCodeForTokens(code, redirectUri) {
   const { clientId, clientSecret } = getOAuthConfig();
@@ -90,17 +90,17 @@ async function exchangeCodeForTokens(code, redirectUri) {
   return tokens;
 }
 
-function getGoogleOAuthAudience() {
-  return trimEnv("GOOGLE_GMAIL_CLIENT_ID") || trimEnv("GOOGLE_CLIENT_ID");
-}
+// function getGoogleOAuthAudience() {
+//   return trimEnv("GOOGLE_GMAIL_CLIENT_ID") || trimEnv("GOOGLE_CLIENT_ID");
+// }
 
-async function verifyGoogleIdToken(idToken) {
-  const { OAuth2Client } = require("google-auth-library");
-  const audience = getGoogleOAuthAudience();
-  const client = new OAuth2Client(audience);
-  const ticket = await client.verifyIdToken({ idToken, audience });
-  return ticket.getPayload();
-}
+// async function verifyGoogleIdToken(idToken) {
+//   const { OAuth2Client } = require("google-auth-library");
+//   const audience = getGoogleOAuthAudience();
+//   const client = new OAuth2Client(audience);
+//   const ticket = await client.verifyIdToken({ idToken, audience });
+//   return ticket.getPayload();
+// }
 
 function gmailClientForRefreshToken(refreshToken) {
   if (!refreshToken) {
@@ -131,12 +131,12 @@ async function getGmailAccessTokenFromRefresh(refreshToken) {
 
 module.exports = {
   getOAuthClient,
-  getGmailAuthUrl,
+  // getGmailAuthUrl,
   exchangeCodeForTokens,
   gmailClientForRefreshToken,
   getGmailAccessTokenFromRefresh,
-  createConnectState,
+  // createConnectState,
   consumeConnectState,
-  getGoogleOAuthAudience,
-  verifyGoogleIdToken,
+  // getGoogleOAuthAudience,
+  // verifyGoogleIdToken,
 };

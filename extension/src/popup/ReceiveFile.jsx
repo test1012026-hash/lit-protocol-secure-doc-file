@@ -7,7 +7,6 @@ import {
   parseEncryptedPackageFromBytes,
 } from "../lib/lit";
 import { googleSignIn, getMailboxAccessToken } from "../lib/googleAuth";
-import { DEMO_MODE } from "../lib/config";
 import {
   parseOrThrow,
   receiveFileFormSchema,
@@ -45,14 +44,13 @@ function formatMailDate(value) {
 }
 
 function truncateText(value, maxLen) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const text = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (text.length <= maxLen) return text;
   return `${text.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
 }
 
-/**
- * Open decrypted message in a new tab styled like a Gmail popout.
- */
 function openMessageTab(text, meta = {}) {
   const isHtml = looksLikeHtml(text);
   const bodyInner = isHtml
@@ -200,7 +198,9 @@ function openMessageTab(text, meta = {}) {
   <main>
     <h1>${escapeHtml(subject)} <span class="badge">Decrypted</span></h1>
     <div class="meta-row">
-      <div class="avatar">${escapeHtml((from || "?").trim().charAt(0).toUpperCase() || "?")}</div>
+      <div class="avatar">${escapeHtml(
+        (from || "?").trim().charAt(0).toUpperCase() || "?",
+      )}</div>
       <div>
         <div class="from">${escapeHtml(from || "Unknown sender")}</div>
         ${to ? `<div class="addrs">to: ${escapeHtml(to)}</div>` : ""}
@@ -272,9 +272,7 @@ export default function ReceiveFile({ auth }) {
     return (
       <p
         className={
-          status.startsWith("Error")
-            ? "error-banner"
-            : "status-text status-ok"
+          status.startsWith("Error") ? "error-banner" : "status-text status-ok"
         }
       >
         {status}
@@ -288,10 +286,6 @@ export default function ReceiveFile({ auth }) {
     statusMode = "file",
   ) => {
     let googleIdToken = auth.googleIdToken || null;
-    if (!DEMO_MODE && encryptedPackage.mode === "lit") {
-      setTabStatus(statusMode, "Verifying identity with Google...");
-      googleIdToken = googleIdToken || (await googleSignIn());
-    }
 
     setTabStatus(statusMode, "Unlocking private key + decrypting...");
     const decrypted = await decryptForRecipient({
@@ -357,7 +351,9 @@ export default function ReceiveFile({ auth }) {
         setTabStatus(
           "mailbox",
           messages.length
-            ? `Loaded ${messages.length} SecureDocShare email${messages.length === 1 ? "" : "s"}.`
+            ? `Loaded ${messages.length} SecureDocShare email${
+                messages.length === 1 ? "" : "s"
+              }.`
             : "No SecureDocShare emails found.",
         );
       } else {
@@ -409,7 +405,13 @@ export default function ReceiveFile({ auth }) {
       loadMailboxPage({ reset: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mailbox, mailboxNextPageToken, mailboxLoading, mailboxLoadingMore, receiveMode]);
+  }, [
+    mailbox,
+    mailboxNextPageToken,
+    mailboxLoading,
+    mailboxLoadingMore,
+    receiveMode,
+  ]);
 
   const handleDecryptMailboxItem = async (item) => {
     try {
@@ -530,7 +532,9 @@ export default function ReceiveFile({ auth }) {
         </button>
         <button
           type="button"
-          className={`btn btn-tab ${receiveMode === "paste" ? "is-active" : ""}`}
+          className={`btn btn-tab ${
+            receiveMode === "paste" ? "is-active" : ""
+          }`}
           onClick={() => setReceiveMode("paste")}
           disabled={loading || receiveMode === "paste"}
         >
@@ -538,7 +542,9 @@ export default function ReceiveFile({ auth }) {
         </button>
         <button
           type="button"
-          className={`btn btn-tab ${receiveMode === "mailbox" ? "is-active" : ""}`}
+          className={`btn btn-tab ${
+            receiveMode === "mailbox" ? "is-active" : ""
+          }`}
           onClick={() => setReceiveMode("mailbox")}
           disabled={loading || receiveMode === "mailbox"}
         >
@@ -560,9 +566,9 @@ export default function ReceiveFile({ auth }) {
             </button>
             <span className="mailbox-count">
               {mailbox.length
-                ? `${mailbox.length} secure email${mailbox.length === 1 ? "" : "s"}${
-                    mailboxNextPageToken ? " · scroll for more" : ""
-                  }`
+                ? `${mailbox.length} secure email${
+                    mailbox.length === 1 ? "" : "s"
+                  }${mailboxNextPageToken ? " · scroll for more" : ""}`
                 : "No emails loaded yet"}
             </span>
           </div>
@@ -597,9 +603,7 @@ export default function ReceiveFile({ auth }) {
                           }
                           onClick={() => handleDecryptMailboxItem(item)}
                         >
-                          {decryptingId === item.id
-                            ? "Decrypting…"
-                            : "Decrypt"}
+                          {decryptingId === item.id ? "Decrypting…" : "Decrypt"}
                         </button>
                       </div>
                       <div className="mailbox-subject" title={subjectFull}>

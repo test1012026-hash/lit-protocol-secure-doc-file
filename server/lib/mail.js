@@ -130,7 +130,6 @@ async function sendEncryptedFileEmail({
   attachmentName,
   attachmentBase64,
   encryptedPackageText = "",
-  demoMode,
   gmailAccessToken,
   senderRefreshToken,
 }) {

@@ -11,7 +11,6 @@ import {
   saveAuth,
 } from "../lib/authStorage";
 import { ensureUserKeyPair } from "../lib/userKeys";
-import { DEMO_MODE } from "../lib/config";
 import { getLitActionId } from "../lib/lit";
 import { api } from "../lib/api";
 
@@ -51,7 +50,6 @@ export default function App() {
     delete sanitized.googleAccessToken;
 
     let next = sanitized;
-    if (DEMO_MODE) {
       try {
         await ensureUserKeyPair(sanitized, getLitActionId);
         next = {
@@ -62,7 +60,6 @@ export default function App() {
         console.error("Key setup failed:", err);
         throw err;
       }
-    }
     await saveAuth(next);
     setAuth(next);
     setShowSetPassword(false);
@@ -86,7 +83,6 @@ export default function App() {
       } catch (err) {
         console.error("Subscription refresh failed:", err);
       }
-      if (!DEMO_MODE) return;
       // Create keys only once; never regenerate on later opens/sends.
       if (auth.hasPublicKey) return;
       try {

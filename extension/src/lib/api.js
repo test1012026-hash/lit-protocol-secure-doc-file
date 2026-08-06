@@ -133,9 +133,9 @@ export const api = {
   requestPasswordReset: (email) =>
     client.post("/auth/password-reset/request", { email }),
   gmailStatus: (token) => client.get("/auth/gmail/status", authHeader(token)),
-  gmailConnect: (token) => client.get("/auth/gmail/connect", authHeader(token)),
-  gmailDisconnect: (token) =>
-    client.post("/auth/gmail/disconnect", {}, authHeader(token)),
+  // gmailConnect: (token) => client.get("/auth/gmail/connect", authHeader(token)),
+  // gmailDisconnect: (token) =>
+  //   client.post("/auth/gmail/disconnect", {}, authHeader(token)),
   getSubscription: (token) =>
     client.get("/auth/subscription", authHeader(token)),
   gmailSendToken: (token) =>
