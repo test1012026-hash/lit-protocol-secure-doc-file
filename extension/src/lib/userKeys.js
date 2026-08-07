@@ -1,12 +1,4 @@
-/**
- * Demo-mode RSA key system
- * -------------------------
- * - Public key → MongoDB (used for every send).
- * - Private key → MongoDB, AES-GCM wrapped.
- * - Passphrase = uuid + "|" + Lit action id from VITE_LIT_ACTION_ID (not stored).
- * - Every email: new AES key wrapped with recipient public key.
- */
-
+import { base64ToBytes } from "../utils/utils";
 import { api } from "./api";
 
 function bytesToBase64(bytes) {
@@ -16,14 +8,6 @@ function bytesToBase64(bytes) {
     binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
   return btoa(binary);
-}
-
-function base64ToBytes(base64) {
-  const cleaned = String(base64 || "").replace(/\s+/g, "");
-  const binary = atob(cleaned);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
 }
 
 /** Passphrase = account UUID + VITE_LIT_ACTION_ID. */
