@@ -167,7 +167,7 @@ async function gmailFetch(accessToken, path) {
 }
 
 const SECURE_MAIL_QUERY =
-  "(ciphertext OR SecureDocShare OR sds. OR filename:securemsg) -subject:re: -subject:fwd: -subject:fw:";
+  "(ciphertext OR sds. OR filename:securemsg) -subject:re: -subject:fwd: -subject:fw:";
 
 export async function listMailboxMessages(
   accessToken,
