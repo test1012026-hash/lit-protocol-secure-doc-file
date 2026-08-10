@@ -7,6 +7,12 @@ const client = axios.create({
   timeout: 60_000,
 });
 
+/** Large PDF encrypt/decrypt needs a longer timeout (upload + AES + download). */
+const largeFileClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 180_000,
+});
+
 function authHeader(token) {
   return { headers: { Authorization: `Bearer ${token}` } };
 }
@@ -20,7 +26,6 @@ async function persistRefreshedAuth(data) {
     token: data.token,
     refreshToken: data.refreshToken,
   };
-  // Keep profile/subscription fields from refresh response when present.
   for (const key of [
     "uuid",
     "email",
@@ -39,10 +44,6 @@ async function persistRefreshedAuth(data) {
   return next;
 }
 
-/**
- * Use refresh token to mint a new access JWT.
- * If refresh fails, clears session (caller should show login).
- */
 export async function refreshSession() {
   if (refreshPromise) return refreshPromise;
 
@@ -94,24 +95,26 @@ function shouldAttemptRefresh(error) {
   );
 }
 
+async function refreshAndRetry(error, axiosClient) {
+  const original = error.config;
+  if (!original || !shouldAttemptRefresh(error)) {
+    throw error;
+  }
+  const nextAuth = await refreshSession();
+  original._retry = true;
+  original.headers = original.headers || {};
+  original.headers.Authorization = `Bearer ${nextAuth.token}`;
+  return axiosClient.request(original);
+}
+
 client.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    const original = error.config;
-    if (!original || !shouldAttemptRefresh(error)) {
-      throw error;
-    }
+  (error) => refreshAndRetry(error, client),
+);
 
-    try {
-      const nextAuth = await refreshSession();
-      original._retry = true;
-      original.headers = original.headers || {};
-      original.headers.Authorization = `Bearer ${nextAuth.token}`;
-      return client.request(original);
-    } catch (refreshErr) {
-      throw refreshErr;
-    }
-  },
+largeFileClient.interceptors.response.use(
+  (response) => response,
+  (error) => refreshAndRetry(error, largeFileClient),
 );
 
 export const api = {
@@ -133,9 +136,6 @@ export const api = {
   requestPasswordReset: (email) =>
     client.post("/auth/password-reset/request", { email }),
   gmailStatus: (token) => client.get("/auth/gmail/status", authHeader(token)),
-  // gmailConnect: (token) => client.get("/auth/gmail/connect", authHeader(token)),
-  // gmailDisconnect: (token) =>
-  //   client.post("/auth/gmail/disconnect", {}, authHeader(token)),
   getSubscription: (token) =>
     client.get("/auth/subscription", authHeader(token)),
   gmailSendToken: (token) =>
@@ -150,9 +150,23 @@ export const api = {
     ),
   provisionRecipientKeys: (payload, token) =>
     client.post("/files/provision-recipient-keys", payload, authHeader(token)),
+  encryptFile: (payload, token) =>
+    largeFileClient.post("/files/encrypt", payload, {
+      ...authHeader(token),
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    }),
+  decryptFile: (payload, token) =>
+    largeFileClient.post("/files/decrypt", payload, {
+      ...authHeader(token),
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    }),
   sendFile: (payload, token) =>
     client.post("/files/send", payload, authHeader(token)),
   registerKeys: (payload, token) =>
     client.post("/auth/keys", payload, authHeader(token)),
+  ensureKeys: (token) =>
+    client.post("/auth/keys/ensure", {}, authHeader(token)),
   getMyKeys: (token) => client.get("/auth/keys/me", authHeader(token)),
 };

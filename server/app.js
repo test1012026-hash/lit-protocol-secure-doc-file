@@ -10,7 +10,8 @@ const fileRoutes = require("./routes/files");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "40mb" }));
+app.use(express.urlencoded({ extended: true, limit: "40mb" }));
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
@@ -43,5 +44,17 @@ app.use(async (req, res, next) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/files", fileRoutes);
+
+// Express body-parser throws this before route handlers run.
+app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large" || err?.name === "PayloadTooLargeError") {
+    return res.status(413).json({
+      error:
+        "File is too large for the encrypt API. Use a PDF under ~25 MB.",
+      code: "PAYLOAD_TOO_LARGE",
+    });
+  }
+  next(err);
+});
 
 module.exports = app;

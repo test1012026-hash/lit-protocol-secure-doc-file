@@ -10,8 +10,6 @@ import {
   saveActiveTab,
   saveAuth,
 } from "../lib/authStorage";
-import { ensureUserKeyPair } from "../lib/userKeys";
-import { getLitActionId } from "../lib/lit";
 import { api } from "../lib/api";
 
 export default function App() {
@@ -50,16 +48,16 @@ export default function App() {
     delete sanitized.googleAccessToken;
 
     let next = sanitized;
-      try {
-        await ensureUserKeyPair(sanitized, getLitActionId);
-        next = {
-          ...sanitized,
-          hasPublicKey: true,
-        };
-      } catch (err) {
-        console.error("Key setup failed:", err);
-        throw err;
-      }
+    try {
+      await api.ensureKeys(sanitized.token);
+      next = {
+        ...sanitized,
+        hasPublicKey: true,
+      };
+    } catch (err) {
+      console.error("Key setup failed:", err);
+      throw err;
+    }
     await saveAuth(next);
     setAuth(next);
     setShowSetPassword(false);
@@ -83,13 +81,10 @@ export default function App() {
       } catch (err) {
         console.error("Subscription refresh failed:", err);
       }
-      // Create keys only once; never regenerate on later opens/sends.
+      // Create keys only once on the server; never regenerate on later opens.
       if (auth.hasPublicKey) return;
       try {
-        await ensureUserKeyPair(
-          { uuid: auth.uuid, token: auth.token, hasPublicKey: false },
-          getLitActionId,
-        );
+        await api.ensureKeys(auth.token);
         if (!cancelled) {
           setAuth((prev) => {
             if (!prev) return prev;

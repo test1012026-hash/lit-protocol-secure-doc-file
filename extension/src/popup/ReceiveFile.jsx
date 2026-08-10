@@ -1,11 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import DOMPurify from "dompurify";
-import {
-  decryptForRecipient,
-  parseDecryptedContent,
-  parseEncryptedPackage,
-  parseEncryptedPackageFromBytes,
-} from "../lib/lit";
+import { api } from "../lib/api";
 import { googleSignIn, getMailboxAccessToken } from "../lib/googleAuth";
 import {
   parseOrThrow,
@@ -16,18 +11,13 @@ import {
   downloadGmailAttachment,
   listMailboxMessages,
 } from "../lib/gmailMailbox";
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function looksLikeHtml(text) {
-  return /<\/?[a-z][\s\S]*>/i.test(String(text || ""));
-}
+import {
+  base64ToBytes,
+  bytesToBase64,
+  escapeHtml,
+  looksLikeHtml,
+  toErrorStatus,
+} from "../utils/utils";
 
 function formatMailDate(value) {
   if (!value) return "";
@@ -242,6 +232,19 @@ async function openDecryptedContent(content, meta = {}) {
     : "Decrypted, but no message or file was found.";
 }
 
+function contentFromDecryptApi(data) {
+  return {
+    message: data.message || null,
+    file: data.file
+      ? {
+          filename: data.file.filename || "document.pdf",
+          mimeType: data.file.mimeType || "application/pdf",
+          bytes: base64ToBytes(data.file.dataBase64),
+        }
+      : null,
+  };
+}
+
 export default function ReceiveFile({ auth }) {
   const [receiveMode, setReceiveMode] = useState("file");
   const [encryptedFile, setEncryptedFile] = useState(null);
@@ -280,22 +283,10 @@ export default function ReceiveFile({ auth }) {
     );
   };
 
-  const decryptPackage = async (
-    encryptedPackage,
-    meta = {},
-    statusMode = "file",
-  ) => {
-    let googleIdToken = auth.googleIdToken || null;
-
-    setTabStatus(statusMode, "Unlocking private key + decrypting...");
-    const decrypted = await decryptForRecipient({
-      encryptedPackage,
-      recipientUuid: auth.uuid,
-      googleIdToken,
-      authToken: auth.token,
-    });
-
-    const content = parseDecryptedContent(decrypted, encryptedPackage);
+  const decryptViaApi = async (apiPayload, meta = {}, statusMode = "file") => {
+    setTabStatus(statusMode, "Decrypting on server...");
+    const { data } = await api.decryptFile(apiPayload, auth.token);
+    const content = contentFromDecryptApi(data);
     return await openDecryptedContent(content, meta);
   };
 
@@ -366,10 +357,7 @@ export default function ReceiveFile({ auth }) {
       }
     } catch (err) {
       console.error("[SecureDocShare] Mailbox load failed", err);
-      setTabStatus(
-        "mailbox",
-        "Error: " + (err.response?.data?.error || err.message),
-      );
+      setTabStatus("mailbox", toErrorStatus(err));
     } finally {
       setMailboxLoading(false);
       setMailboxLoadingMore(false);
@@ -433,10 +421,13 @@ export default function ReceiveFile({ auth }) {
       };
 
       if (item.ciphertext) {
-        const encryptedPackage = parseEncryptedPackage(item.ciphertext);
         setTabStatus(
           "mailbox",
-          await decryptPackage(encryptedPackage, meta, "mailbox"),
+          await decryptViaApi(
+            { packageText: item.ciphertext },
+            meta,
+            "mailbox",
+          ),
         );
         return;
       }
@@ -461,17 +452,17 @@ export default function ReceiveFile({ auth }) {
       if (!bytes?.byteLength) {
         throw new Error("Could not download the secure attachment.");
       }
-      const encryptedPackage = parseEncryptedPackageFromBytes(bytes);
       setTabStatus(
         "mailbox",
-        await decryptPackage(encryptedPackage, meta, "mailbox"),
+        await decryptViaApi(
+          { packageBase64: bytesToBase64(bytes) },
+          meta,
+          "mailbox",
+        ),
       );
     } catch (err) {
       console.error("[SecureDocShare] Mailbox decrypt failed", err);
-      setTabStatus(
-        "mailbox",
-        "Error: " + (err.response?.data?.error || err.message),
-      );
+      setTabStatus("mailbox", toErrorStatus(err));
     } finally {
       setDecryptingId(null);
       setLoading(false);
@@ -488,26 +479,28 @@ export default function ReceiveFile({ auth }) {
         );
       }
 
-      let encryptedPackage;
       if (mode === "paste") {
         const values = parseOrThrow(receivePasteFormSchema, { packageText });
-        setTabStatus(mode, "Reading pasted encrypted package...");
-        encryptedPackage = parseEncryptedPackage(values.packageText);
+        setTabStatus(mode, "Sending ciphertext to server...");
+        setTabStatus(
+          mode,
+          await decryptViaApi({ packageText: values.packageText }, {}, mode),
+        );
       } else {
         const values = parseOrThrow(receiveFileFormSchema, { encryptedFile });
-        setTabStatus(mode, "Reading encrypted file...");
-        const buffer = await values.encryptedFile.arrayBuffer();
-        encryptedPackage = parseEncryptedPackageFromBytes(
-          new Uint8Array(buffer),
+        setTabStatus(mode, "Uploading encrypted file to server...");
+        const bytes = new Uint8Array(await values.encryptedFile.arrayBuffer());
+        setTabStatus(
+          mode,
+          await decryptViaApi(
+            { packageBase64: bytesToBase64(bytes) },
+            {},
+            mode,
+          ),
         );
       }
-
-      setTabStatus(mode, await decryptPackage(encryptedPackage, {}, mode));
     } catch (err) {
-      setTabStatus(
-        mode,
-        "Error: " + (err.response?.data?.error || err.message),
-      );
+      setTabStatus(mode, toErrorStatus(err));
     } finally {
       setLoading(false);
     }

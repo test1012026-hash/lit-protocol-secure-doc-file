@@ -1,4 +1,21 @@
 import { buildEmailBodies, createMimeRfc822Blob } from "./email";
+import { base64ToBytes } from "../utils/utils";
+
+/**
+ * Prefer binary MIME (no base64 CTE). Base64 CTE inflates size ~33% and
+ * makes Gmail uploadType=media much slower for large PDFs.
+ */
+function resolveAttachmentBytes(attachmentBytes, attachmentBase64) {
+  if (attachmentBytes && attachmentBytes.byteLength) {
+    return attachmentBytes instanceof Uint8Array
+      ? attachmentBytes
+      : new Uint8Array(attachmentBytes);
+  }
+  if (attachmentBase64) {
+    return base64ToBytes(attachmentBase64);
+  }
+  return null;
+}
 
 export async function sendEncryptedEmailViaGmail({
   accessToken,
@@ -10,13 +27,13 @@ export async function sendEncryptedEmailViaGmail({
   attachmentBase64,
   attachmentBytes,
   appUrl,
+  onProgress,
 }) {
   if (!accessToken) throw new Error("Gmail access token is required.");
   if (!from || !to) throw new Error("Sender and recipient are required.");
 
-  const hasAttachment = Boolean(
-    (attachmentBytes && attachmentBytes.byteLength) || attachmentBase64,
-  );
+  const bytes = resolveAttachmentBytes(attachmentBytes, attachmentBase64);
+  const hasAttachment = Boolean(bytes?.byteLength);
   const { text, html } = buildEmailBodies({
     senderEmail: from,
     message,
@@ -31,9 +48,22 @@ export async function sendEncryptedEmailViaGmail({
     text,
     html,
     attachmentName,
-    attachmentBase64,
-    attachmentBytes,
+    // Always use binary path when we have bytes — never re-base64 the MIME body.
+    attachmentBytes: bytes,
+    attachmentBase64: null,
   });
+
+  const sizeMb = (mimeBlob.size / (1024 * 1024)).toFixed(1);
+  if (typeof onProgress === "function") {
+    onProgress(`Uploading to Gmail (${sizeMb} MB)…`);
+  }
+
+  // Gmail's documented limit is ~25MB for the total encoded message.
+  if (mimeBlob.size > 24.5 * 1024 * 1024) {
+    throw new Error(
+      `Message is ${sizeMb} MB after encryption (Gmail limit ~25 MB). Use a smaller PDF.`,
+    );
+  }
 
   // uploadType=media supports large messages (JSON { raw } is capped ~5MB).
   const res = await fetch(

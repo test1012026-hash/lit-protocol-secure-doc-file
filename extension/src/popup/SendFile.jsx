@@ -1,10 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import {
-  buildContentPayloadBytes,
-  buildEncryptedPackage,
-  encryptForRecipient,
-  getLitActionId,
-} from "../lib/lit";
 import { api } from "../lib/api";
 import {
   isEmptyRichText,
@@ -14,10 +8,23 @@ import {
 import { getStoredAuth } from "../lib/authStorage";
 import { normalizeEmail } from "../lib/email";
 import { ensureGmailConnected } from "../lib/googleAuth";
-import { provisionRecipientKeyPair } from "../lib/userKeys";
 import { sendEncryptedEmailViaGmail } from "../lib/gmailSend";
+import { getApiErrorCode, toErrorStatus } from "../utils/utils";
 import RichTextEditor from "./RichTextEditor";
 import RecipientEmailInput from "./RecipientEmailInput";
+
+async function fileToBase64(file) {
+  // FileReader is much faster than manual byte→string→btoa for large PDFs.
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () =>
+      reject(reader.error || new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+  const comma = dataUrl.indexOf(",");
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
 
 export default function SendFile({ auth }) {
   const [recipientEmails, setRecipientEmails] = useState([]);
@@ -42,121 +49,48 @@ export default function SendFile({ auth }) {
     from,
     appUrl,
   }) => {
-    const { data: recipient } = await api.ensureRecipient(
-      recipientEmail,
-      auth.token,
-    );
-
-    let iron = recipient.iron || null;
-    if (!iron) {
-      const provisioned = await provisionRecipientKeyPair({
-        recipientEmail,
-        recipientUuid: recipient.recipientUuid,
-        token: auth.token,
-        getLitActionId,
-      });
-      iron = provisioned.iron;
-    }
-
-    if (!iron) {
-      throw new Error(
-        `Could not create a public key for ${recipientEmail}. Try again.`,
-      );
-    }
-
-    const hasMessage = !isEmptyRichText(values.message);
     const hasFile = values.file instanceof File;
-
-    let messageCipherText = "";
-    let encryptedPackage = null;
-    let contentKind = "file";
-
-    if (hasMessage) {
-      const messageBytes = await buildContentPayloadBytes({
-        message: values.message,
-        file: null,
-      });
-      const encryptedMessage = await encryptForRecipient(
-        messageBytes,
-        recipient.recipientUuid,
-        { iron },
-      );
-      const messagePackage = await buildEncryptedPackage({
-        ciphertext: encryptedMessage.ciphertext,
-        iv: encryptedMessage.iv,
-        wrappedKey: encryptedMessage.wrappedKey,
-        recipientUuidHash: encryptedMessage.recipientUuidHash,
-        actionId: encryptedMessage.actionId,
-        expectedEmail: recipientEmail,
-        filename: "message.json",
-        mimeType: "application/json",
-        mode: encryptedMessage.mode,
-        keyScheme: encryptedMessage.keyScheme,
-        kind: "message",
-      });
-      messageCipherText = messagePackage.cipherText;
-      if (!hasFile) {
-        encryptedPackage = messagePackage;
-        contentKind = "message";
-      }
-    }
+    const payload = {
+      recipientEmail,
+      subject: values.subject || "",
+      message: isEmptyRichText(values.message) ? "" : values.message,
+    };
 
     if (hasFile) {
-      const fileBytes = await buildContentPayloadBytes({
-        message: "",
-        file: values.file,
-      });
-      const encryptedFile = await encryptForRecipient(
-        fileBytes,
-        recipient.recipientUuid,
-        { iron },
-      );
-      const packageName =
-        values.file.name.replace(/\.[^./\\]+$/, "") || "document";
-      encryptedPackage = await buildEncryptedPackage({
-        ciphertext: encryptedFile.ciphertext,
-        iv: encryptedFile.iv,
-        wrappedKey: encryptedFile.wrappedKey,
-        recipientUuidHash: encryptedFile.recipientUuidHash,
-        actionId: encryptedFile.actionId,
-        expectedEmail: recipientEmail,
-        filename: `${packageName}.json`,
-        mimeType: "application/json",
-        mode: encryptedFile.mode,
-        keyScheme: encryptedFile.keyScheme,
-        kind: "file",
-      });
-      contentKind = hasMessage ? "bundle" : "file";
+      payload.fileBase64 = await fileToBase64(values.file);
+      payload.fileName = values.file.name;
+      payload.mimeType = values.file.type || "application/pdf";
     }
 
-    const subjectText =
-      values.subject || (hasFile ? values.file.name : "Secure message");
+    const { data: encrypted } = await api.encryptFile(payload, auth.token);
 
     await api.sendFile(
       {
         recipientEmail,
-        recipientUuid: recipient.recipientUuid,
-        subject: subjectText,
-        message: messageCipherText,
-        filename: hasFile ? values.file.name : "message.txt",
-        contentKind,
+        recipientUuid: encrypted.recipientUuid,
+        subject: encrypted.subject,
+        message: encrypted.messageCipherText || "",
+        filename: encrypted.filename,
+        contentKind: encrypted.contentKind,
         clientSend: true,
       },
       auth.token,
     );
 
+    const attachment = encrypted.attachment;
     await sendEncryptedEmailViaGmail({
       accessToken: gmailAccessToken,
       from,
       to: recipientEmail,
-      subject: subjectText,
-      message: messageCipherText,
-      attachmentName: encryptedPackage?.fileName,
-      attachmentBytes: encryptedPackage?.attachmentBytes || null,
-      attachmentBase64: encryptedPackage?.attachmentBytes
-        ? null
-        : encryptedPackage?.base64 || null,
+      subject: encrypted.subject,
+      message: encrypted.messageCipherText || "",
+      attachmentName: attachment?.fileName,
+      attachmentBase64:
+        attachment?.attachmentBase64 || attachment?.base64 || null,
       appUrl,
+      onProgress: (msg) => {
+        if (typeof setStatus === "function") setStatus(msg);
+      },
     });
   };
 
@@ -170,9 +104,7 @@ export default function SendFile({ auth }) {
       }
 
       const self = normalizeEmail(storedAuth?.email || auth.email);
-      if (
-        recipientEmails.some((email) => normalizeEmail(email) === self)
-      ) {
+      if (recipientEmails.some((email) => normalizeEmail(email) === self)) {
         setStatus("Error: You cannot send to yourself");
         return;
       }
@@ -183,6 +115,13 @@ export default function SendFile({ auth }) {
         message,
         file,
       });
+
+      if (values.file instanceof File && values.file.size > 18 * 1024 * 1024) {
+        setStatus(
+          "Error: PDF should be under ~18 MB before encryption so the Gmail message stays under 25 MB.",
+        );
+        return;
+      }
 
       setLoading(true);
       if (!auth.gmailConnected) {
@@ -199,7 +138,7 @@ export default function SendFile({ auth }) {
       for (let i = 0; i < values.recipientEmails.length; i++) {
         const recipientEmail = values.recipientEmails[i];
         setStatus(
-          `Encrypting & sending ${i + 1}/${values.recipientEmails.length}: ${recipientEmail}…`,
+          `Encrypting ${i + 1}/${values.recipientEmails.length}: ${recipientEmail}…`,
         );
         await sendToOneRecipient({
           recipientEmail,
@@ -218,7 +157,7 @@ export default function SendFile({ auth }) {
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (err) {
-      const code = err.response?.data?.code || err.code;
+      const code = getApiErrorCode(err);
       if (code === "SUBSCRIPTION_EXPIRED") {
         setStatus(
           "Error: " +
@@ -237,13 +176,11 @@ export default function SendFile({ auth }) {
           setStatus("Gmail reconnected. Click send again.");
           return;
         } catch (retryErr) {
-          setStatus(
-            "Error: " + (retryErr.response?.data?.error || retryErr.message),
-          );
+          setStatus(toErrorStatus(retryErr));
           return;
         }
       }
-      setStatus("Error: " + (err.response?.data?.error || err.message));
+      setStatus(toErrorStatus(err));
     } finally {
       setLoading(false);
     }

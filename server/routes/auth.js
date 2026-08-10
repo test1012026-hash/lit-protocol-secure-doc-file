@@ -574,6 +574,41 @@ router.get("/keys/me", authMiddleware, async (req, res) => {
   }
 });
 
+/** Create RSA keys on the server if the logged-in user has none. */
+router.post("/keys/ensure", authMiddleware, async (req, res) => {
+  try {
+    const { createKeyBundleForUuid } = require("../lib/secureCrypto");
+    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.iron && user.thor && user.hulk && user.venom) {
+      return res.json({
+        ok: true,
+        hasPublicKey: true,
+        created: false,
+        iron: user.iron,
+      });
+    }
+
+    const bundle = createKeyBundleForUuid(user.uuid);
+    user.iron = bundle.iron;
+    user.thor = bundle.thor;
+    user.hulk = bundle.hulk;
+    user.venom = bundle.venom;
+    await user.save();
+    await User.updateOne({ _id: user._id }, { $unset: { keyActionId: 1 } });
+
+    res.json({
+      ok: true,
+      hasPublicKey: true,
+      created: true,
+      iron: user.iron,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // router.post("/google/refresh", authMiddleware, async (req, res) => {
 //   try {
 //     const { code, redirectUri } = req.body;

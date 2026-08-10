@@ -135,6 +135,70 @@ const provisionRecipientKeysSchema = z.object({
   venom: registerPublicKeySchema.shape.venom,
 });
 
+/** Extension sends plaintext; backend encrypts. */
+const encryptFileSchema = z
+  .object({
+    recipientEmail: emailSchema,
+    subject: z.string().trim().max(200).optional().default(""),
+    message: z.string().max(50000).optional().default(""),
+    /** PDF (or any file) as base64 — no data: URL prefix required. */
+    fileBase64: z.string().min(1).max(35_000_000).optional(),
+    fileName: z.string().trim().max(255).optional(),
+    mimeType: z.string().trim().max(100).optional(),
+  })
+  .superRefine((data, ctx) => {
+    const hasMessage = String(data.message || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim().length > 0;
+    const hasFile = Boolean(data.fileBase64);
+    if (!hasMessage && !hasFile) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Add a message or a PDF (or both)",
+        path: ["message"],
+      });
+    }
+    if (hasFile && data.fileName) {
+      const lower = data.fileName.toLowerCase();
+      if (
+        !lower.endsWith(".pdf") &&
+        data.mimeType &&
+        data.mimeType !== "application/pdf"
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Only PDF files are allowed",
+          path: ["fileName"],
+        });
+      }
+    }
+  });
+
+/** Extension sends ciphertext / attachment; backend decrypts. */
+const decryptFileSchema = z
+  .object({
+    packageText: z.string().trim().min(8).max(2_000_000).optional(),
+    /** Raw attachment bytes (SDSB or JSON) as base64. */
+    packageBase64: z.string().min(8).max(35_000_000).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (!data.packageText && !data.packageBase64) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide packageText (sds.) or packageBase64 (attachment)",
+        path: ["packageText"],
+      });
+    }
+  });
+
+/**
+ * One-shot for other apps: check sender subscription, ensure recipient,
+ * encrypt message (+ optional PDF), send via Gmail.
+ */
+const secureSendSchema = encryptFileSchema;
+
 module.exports = {
   signupSchema,
   loginSchema,
@@ -148,4 +212,7 @@ module.exports = {
   gmailAccessTokenSchema,
   registerPublicKeySchema,
   provisionRecipientKeysSchema,
+  encryptFileSchema,
+  decryptFileSchema,
+  secureSendSchema,
 };
