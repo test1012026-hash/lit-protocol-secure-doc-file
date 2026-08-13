@@ -1,28 +1,3 @@
-/**
- * Portable SecureDocShare helper for other repos.
- *
- * Copy this file into any Node 18+ / browser project that has `fetch`.
- *
- * Flow:
- *  1. Resolve auth (token, or email+password login)
- *  2. Confirm sender exists + subscription is active
- *  3. Call /api/files/secure-send → creates recipient if needed,
- *     encrypts message (+ optional PDF), sends encrypted Gmail
- *
- * @example
- * const { sendSecureMail } = require("./sendSecureMail");
- * const result = await sendSecureMail({
- *   email: "admin@gmail.com",
- *   password: "Test@123",
- *   to: "friend@example.com",
- *   subject: "Secure docs",
- *   message: "Please open in SecureDocShare",
- *   fileBase64: optionalPdfBase64, // omit if no PDF
- *   fileName: "invoice.pdf",
- * });
- * if (!result.ok) console.error(result.status, result.error, result.code);
- */
-
 const DEFAULT_API_BASE = "https://server-nine-rosy.vercel.app/api";
 
 function normalizeBaseUrl(url) {
@@ -116,138 +91,138 @@ async function loginSecureDoc({
 }
 
 /**
- * Check whether the authenticated sender exists and subscription is active.
- * Expired subscription → ok:false with status 403.
+ * Public — no login / no JWT.
+ * Check whether an email has an account and a valid subscription.
+ *
+ * @example
+ * const { checkSubscription } = require("./sendSecureMail");
+ * const result = await checkSubscription({ email: "admin@gmail.com" });
+ * // result.ok && result.subscriptionActive
  */
-async function checkSenderSubscription({
+async function checkSubscription({
   apiBaseUrl = DEFAULT_API_BASE,
-  token,
+  email,
 } = {}) {
   const baseUrl = normalizeBaseUrl(apiBaseUrl);
-  if (!token) {
-    return failure(401, {
-      error: "Auth token is required",
-      code: "AUTH_REQUIRED",
+  if (!email) {
+    return failure(400, {
+      error: "Email is required",
+      code: "EMAIL_REQUIRED",
     });
   }
 
-  const { res, data } = await apiRequest(baseUrl, "/auth/subscription", {
-    token,
-  });
+  const qs = `?email=${encodeURIComponent(String(email).trim().toLowerCase())}`;
+  const { res, data } = await apiRequest(
+    baseUrl,
+    `/public/subscription-check${qs}`,
+  );
 
-  if (res.status === 404) {
+  if (res.status === 404 || data?.exists === false) {
     return failure(404, {
-      error: data?.error || "User not found",
-      code: "USER_NOT_FOUND",
+      error: data?.error || "No account found for this email",
+      code: data?.code || "USER_NOT_FOUND",
+      exists: false,
+      subscriptionActive: false,
     });
   }
 
-  if (!res.ok) {
-    return failure(res.status, data || {}, "Failed to load subscription");
+  if (!res.ok || data?.ok === false) {
+    return failure(
+      res.status || 500,
+      data || {},
+      data?.error || "Failed to check subscription",
+    );
   }
 
   if (!data?.subscriptionActive) {
     return failure(403, {
       error:
-        data?.error ||
-        "Your free trial has ended. Subscribe to continue sending secure mail.",
+        data?.code === "SUBSCRIBER_NOT_CLAIMED"
+          ? "Account exists but has not been claimed yet"
+          : "Subscription is expired or inactive",
       code: data?.code || "SUBSCRIPTION_EXPIRED",
-      subscriptionExpiresAt: data?.subscriptionExpiresAt || null,
+      exists: true,
+      claimed: Boolean(data.claimed),
       subscriptionActive: false,
+      subscriptionExpiresAt: data?.subscriptionExpiresAt || null,
+      subscriptionDaysLeft: data?.subscriptionDaysLeft ?? 0,
     });
   }
 
   return success(200, {
+    exists: true,
+    claimed: Boolean(data.claimed),
     subscriptionActive: true,
     subscriptionExpiresAt: data.subscriptionExpiresAt || null,
     subscriptionDaysLeft: data.subscriptionDaysLeft ?? null,
+    code: data.code || "SUBSCRIPTION_ACTIVE",
   });
 }
 
+
+
+
 /**
- * Common entry point for other repos.
+ * Public — no login / no JWT.
+ * Creates the recipient if missing, provisions RSA keys, encrypts
+ * message and/or file so only that recipient can decrypt.
  *
- * @param {object} options
- * @param {string} [options.apiBaseUrl] default production API
- * @param {string} [options.token] JWT access token (skip login if set)
- * @param {string} [options.email] login email when token omitted
- * @param {string} [options.password] login password when token omitted
- * @param {string} options.to recipient email
- * @param {string} [options.subject]
- * @param {string} [options.message] plaintext message (encrypted server-side)
- * @param {string} [options.fileBase64] optional PDF as base64 (no data: prefix)
- * @param {string} [options.fileName] e.g. document.pdf
- * @param {string} [options.mimeType] default application/pdf
- * @param {boolean} [options.skipSubscriptionCheck] rely only on secure-send checks
- * @returns {Promise<{ok:boolean,status:number,error?:string,code?:string,emailSent?:boolean,...}>}
+ * Returns separate ciphertexts:
+ *   messageCipherText — encrypted message (sds. token), or null
+ *   fileCipherText    — encrypted file (SDSB base64), or null
+ *
+ * @example
+ * const { encryptOnly } = require("./sendSecureMail");
+ * const result = await encryptOnly({
+ *   to: "receiver@gmail.com",
+ *   message: "Hello",
+ *   fileBase64: "...",
+ *   fileName: "doc.pdf",
+ * });
+ * // result.messageCipherText, result.fileCipherText
  */
-async function sendSecureMail(options = {}) {
+async function encryptOnly(options = {}) {
   const {
     apiBaseUrl = DEFAULT_API_BASE,
-    token: inputToken,
-    email,
-    password,
     to,
+    receiverEmail,
     subject = "",
     message = "",
     fileBase64,
+    fileContent,
     fileName,
     mimeType,
-    skipSubscriptionCheck = false,
   } = options;
 
   const baseUrl = normalizeBaseUrl(apiBaseUrl);
+  const recipient = to || receiverEmail;
 
-  if (!to) {
+  if (!recipient) {
     return failure(400, {
       error: "Recipient email (to) is required",
       code: "RECIPIENT_REQUIRED",
     });
   }
 
+  const filePayload = fileBase64 || fileContent || null;
   const hasMessage = String(message || "").trim().length > 0;
-  const hasFile = Boolean(fileBase64);
+  const hasFile = Boolean(filePayload);
   if (!hasMessage && !hasFile) {
     return failure(400, {
-      error: "Add a message or a PDF (or both)",
+      error: "Add a message or a file (or both)",
       code: "CONTENT_REQUIRED",
     });
   }
 
-  let token = inputToken || null;
-  let loginData = null;
-
-  if (!token) {
-    const loggedIn = await loginSecureDoc({ apiBaseUrl: baseUrl, email, password });
-    if (!loggedIn.ok) return loggedIn;
-    token = loggedIn.token;
-    loginData = loggedIn;
-
-    if (loginData.subscriptionActive === false) {
-      return failure(403, {
-        error:
-          "Your free trial has ended. Subscribe to continue sending secure mail.",
-        code: "SUBSCRIPTION_EXPIRED",
-        subscriptionExpiresAt: loginData.subscriptionExpiresAt,
-      });
-    }
-  }
-
-  if (!skipSubscriptionCheck) {
-    const sub = await checkSenderSubscription({ apiBaseUrl: baseUrl, token });
-    if (!sub.ok) return sub;
-  }
-
-  const { res, data } = await apiRequest(baseUrl, "/files/secure-send", {
+  const { res, data } = await apiRequest(baseUrl, "/public/encrypt", {
     method: "POST",
-    token,
     body: {
-      recipientEmail: to,
+      to: recipient,
       subject,
       message: message || "",
-      ...(fileBase64
+      ...(filePayload
         ? {
-            fileBase64,
+            fileBase64: filePayload,
             fileName: fileName || "document.pdf",
             mimeType: mimeType || "application/pdf",
           }
@@ -259,31 +234,119 @@ async function sendSecureMail(options = {}) {
     return failure(
       res.status || 500,
       data || {},
-      data?.error || "Secure send failed",
+      data?.error || "Encrypt failed",
     );
   }
 
   return success(res.status, {
-    token,
-    emailSent: Boolean(data.emailSent),
-    recipientUuid: data.recipientUuid,
-    recipientEmail: data.recipientEmail,
+    encrypted: true,
+    recipientUuid: data.recipientUuid || null,
+    recipientEmail: data.recipientEmail || null,
     recipientCreated: Boolean(data.recipientCreated),
-    keysCreated: Boolean(data.keysCreated),
     recipientClaimed: Boolean(data.recipientClaimed),
-    contentKind: data.contentKind,
+    keysCreated: Boolean(data.keysCreated),
+    subscriptionActive: Boolean(data.subscriptionActive),
     subject: data.subject,
-    from: data.from,
-    appUrl: data.appUrl,
+    contentKind: data.contentKind || null,
+    messageCipherText: data.messageCipherText || null,
+    fileCipherText: data.fileCipherText || null,
+    attachment: data.attachment || null,
+  });
+}
+
+/**
+ * Public — no login / no JWT.
+ * Decrypt message and/or file ciphertext for a recipient email
+ * (uses the same RSA keys stored for that email).
+ *
+ * @example
+ * const { decryptOnly } = require("./sendSecureMail");
+ * const result = await decryptOnly({
+ *   email: "receiver@gmail.com",
+ *   messageCipherText: "sds....",
+ *   fileCipherText: "<SDSB base64>",
+ * });
+ * // result.message, result.file
+ */
+async function decryptOnly(options = {}) {
+  const {
+    apiBaseUrl = DEFAULT_API_BASE,
+    email,
+    to,
+    receiverEmail,
+    messageCipherText,
+    fileCipherText,
+    packageText,
+    packageBase64,
+    encryptedMessage,
+    encryptedFile,
+    encryptedPdf,
+  } = options;
+
+  const baseUrl = normalizeBaseUrl(apiBaseUrl);
+  const recipient = email || to || receiverEmail;
+
+  if (!recipient) {
+    return failure(400, {
+      error: "Recipient email is required",
+      code: "EMAIL_REQUIRED",
+    });
+  }
+
+  const msgCipher =
+    messageCipherText || packageText || encryptedMessage || null;
+  const fileCipher =
+    fileCipherText ||
+    packageBase64 ||
+    encryptedFile ||
+    encryptedPdf ||
+    null;
+
+  if (!msgCipher && !fileCipher) {
+    return failure(400, {
+      error: "Provide messageCipherText and/or fileCipherText",
+      code: "CIPHERTEXT_REQUIRED",
+    });
+  }
+
+  const { res, data } = await apiRequest(baseUrl, "/public/decrypt", {
+    method: "POST",
+    body: {
+      email: recipient,
+      ...(msgCipher ? { messageCipherText: msgCipher } : {}),
+      ...(fileCipher ? { fileCipherText: fileCipher } : {}),
+    },
+  });
+
+  if (!res.ok || data?.ok === false) {
+    return failure(
+      res.status || 500,
+      data || {},
+      data?.error || "Decrypt failed",
+    );
+  }
+
+  return success(res.status, {
+    decrypted: true,
+    recipientUuid: data.recipientUuid || null,
+    recipientEmail: data.recipientEmail || null,
+    recipientClaimed: Boolean(data.recipientClaimed),
+    messageDecrypted: Boolean(data.messageDecrypted),
+    fileDecrypted: Boolean(data.fileDecrypted),
+    message: data.message || null,
+    file: data.file || null,
+    kind: data.kind || null,
+    filename: data.filename || null,
   });
 }
 
 module.exports = {
   DEFAULT_API_BASE,
-  sendSecureMail,
+  encryptOnly,
+  decryptOnly,
   loginSecureDoc,
-  checkSenderSubscription,
+  checkSubscription,
 };
 
 // ESM-friendly default when bundled / re-exported
-module.exports.default = sendSecureMail;
+module.exports.default = encryptOnly;

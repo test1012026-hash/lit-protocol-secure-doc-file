@@ -217,7 +217,88 @@ ${openButton}
   return true;
 }
 
+/** Plain (unencrypted) message + optional PDF via system Gmail. */
+async function sendPlainFileEmail({
+  to,
+  subject,
+  message = "",
+  fileBase64,
+  fileName,
+  mimeType = "application/pdf",
+}) {
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  const from = process.env.GMAIL_SENDER;
+  if (!refreshToken || !from) {
+    throw new Error(
+      "System Gmail is not configured (GOOGLE_REFRESH_TOKEN / GMAIL_SENDER)",
+    );
+  }
+
+  const bodyText = String(message || "").trim() || "(no message)";
+  const safeHtml = bodyText
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, "<br>");
+  const hasFile = Boolean(fileBase64);
+  const attachmentName = hasFile ? fileName || "document.pdf" : undefined;
+  const contentType = hasFile
+    ? mimeType || "application/pdf"
+    : "application/octet-stream";
+
+  // Temporarily support proper PDF content-type for plain attachments.
+  const boundary = "SecureDocShareBoundary";
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    'Content-Type: multipart/alternative; boundary="altBoundary"',
+    "",
+    "--altBoundary",
+    "Content-Type: text/plain; charset=UTF-8",
+    "",
+    bodyText,
+    "",
+    "--altBoundary",
+    "Content-Type: text/html; charset=UTF-8",
+    "",
+    `<div>${safeHtml}</div>`,
+    "",
+    "--altBoundary--",
+  ];
+
+  if (hasFile) {
+    lines.push(
+      "",
+      `--${boundary}`,
+      `Content-Type: ${contentType}; name="${attachmentName}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${attachmentName}"`,
+      "",
+      String(fileBase64).replace(/\s+/g, ""),
+    );
+  }
+  lines.push("", `--${boundary}--`);
+
+  const raw = Buffer.from(lines.join("\r\n"))
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+  const { gmailClientForRefreshToken } = require("./gmailAuth");
+  const gmail = gmailClientForRefreshToken(refreshToken);
+  await gmail.users.messages.send({ userId: "me", requestBody: { raw } });
+  console.log("Plain email sent from", from, "to", to);
+  return true;
+}
+
 module.exports = {
   sendResetEmail,
   sendEncryptedFileEmail,
+  sendPlainFileEmail,
 };

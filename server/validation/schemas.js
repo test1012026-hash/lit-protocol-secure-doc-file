@@ -199,6 +199,41 @@ const decryptFileSchema = z
  */
 const secureSendSchema = encryptFileSchema;
 
+/** Public subscription lookup by email (no JWT). */
+const subscriptionCheckSchema = z.object({
+  email: emailSchema,
+});
+
+/**
+ * Public (no JWT): if subscriber `to` exists + subscription valid → encrypt;
+ * otherwise send plain message / PDF.
+ */
+const smartSendSchema = z
+  .object({
+    to: emailSchema,
+    subject: z.string().trim().max(200).optional().default(""),
+    message: z.string().max(50000).optional().default(""),
+    fileBase64: z.string().min(1).max(35_000_000).optional(),
+    fileName: z.string().trim().max(255).optional(),
+    mimeType: z.string().trim().max(100).optional(),
+  })
+  .superRefine((data, ctx) => {
+    const hasMessage =
+      String(data.message || "")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim().length > 0;
+    const hasFile = Boolean(data.fileBase64);
+    if (!hasMessage && !hasFile) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Add a message or a PDF (or both)",
+        path: ["message"],
+      });
+    }
+  });
+
 module.exports = {
   signupSchema,
   loginSchema,
@@ -215,4 +250,6 @@ module.exports = {
   encryptFileSchema,
   decryptFileSchema,
   secureSendSchema,
+  smartSendSchema,
+  subscriptionCheckSchema,
 };

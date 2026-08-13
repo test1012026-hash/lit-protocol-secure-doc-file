@@ -10,8 +10,9 @@ const {
   encryptFileSchema,
   decryptFileSchema,
   secureSendSchema,
+  smartSendSchema,
 } = require("../validation/schemas");
-const { sendEncryptedFileEmail } = require("../lib/mail");
+const { sendEncryptedFileEmail, sendPlainFileEmail } = require("../lib/mail");
 const { normalizeEmail } = require("../lib/email");
 const {
   applyEncryptedEmail,
@@ -184,16 +185,20 @@ router.post(
       const recipient = await ensureRecipientByEmail(recipientEmail);
       const { iron } = await ensureKeysOnUser(recipient);
 
-      const { messageCipherText, contentKind, encryptedPackage } =
-        encryptMailPayload({
-          recipientUuid: recipient.uuid,
-          recipientEmail: normalizeEmail(recipientEmail),
-          iron,
-          message: message || "",
-          fileBase64: fileBase64 || null,
-          fileName: fileName || "document.pdf",
-          mimeType: mimeType || "application/pdf",
-        });
+      const {
+        messageCipherText,
+        fileCipherText,
+        contentKind,
+        encryptedPackage,
+      } = encryptMailPayload({
+        recipientUuid: recipient.uuid,
+        recipientEmail: normalizeEmail(recipientEmail),
+        iron,
+        message: message || "",
+        fileBase64: fileBase64 || null,
+        fileName: fileName || "document.pdf",
+        mimeType: mimeType || "application/pdf",
+      });
 
       const hasFile = Boolean(fileBase64);
       const subjectText =
@@ -205,7 +210,8 @@ router.post(
         recipientClaimed: recipient.claimed,
         subject: subjectText,
         contentKind,
-        messageCipherText,
+        messageCipherText: messageCipherText || null,
+        fileCipherText: fileCipherText || null,
         filename: hasFile ? fileName || "document.pdf" : "message.txt",
         attachment: encryptedPackage
           ? {
@@ -281,6 +287,210 @@ router.post(
     }
   },
 );
+
+/**
+ * Public API (no login / no JWT) — encrypt only, nothing is sent.
+ * Prefer POST /api/public/encrypt (same behavior, no validate middleware).
+ *
+ * Creates recipient if missing, provisions RSA keys, encrypts message/file.
+ * Body : { to, message?, fileBase64?, fileName?, mimeType?, subject? }
+ */
+router.post("/encrypt-only", validateBody(smartSendSchema), async (req, res) => {
+  try {
+    const { to, subject, message, fileBase64, fileName, mimeType } = req.body;
+
+    const recipient = await ensureRecipientByEmail(to);
+    const subjectText =
+      subject ||
+      (Boolean(fileBase64) ? fileName || "document.pdf" : "Secure message");
+
+    const { iron } = await ensureKeysOnUser(recipient);
+    const {
+      messageCipherText,
+      fileCipherText,
+      contentKind,
+      encryptedPackage,
+    } = encryptMailPayload({
+      recipientUuid: recipient.uuid,
+      recipientEmail: normalizeEmail(to),
+      iron,
+      message: message || "",
+      fileBase64: fileBase64 || null,
+      fileName: fileName || "document.pdf",
+      mimeType: mimeType || "application/pdf",
+    });
+
+    return res.json({
+      ok: true,
+      encrypted: true,
+      recipientUuid: recipient.uuid,
+      recipientClaimed: recipient.claimed,
+      subscriptionActive: isSubscriptionActive(recipient),
+      subscriptionExpiresAt: recipient.subscriptionExpiresAt
+        ? new Date(recipient.subscriptionExpiresAt).toISOString()
+        : null,
+      subject: subjectText,
+      contentKind,
+      messageCipherText: messageCipherText || null,
+      fileCipherText: fileCipherText || null,
+      attachment: encryptedPackage
+        ? {
+            fileName: encryptedPackage.fileName,
+            base64: encryptedPackage.base64 || null,
+            attachmentBase64: encryptedPackage.attachmentBase64 || null,
+          }
+        : null,
+    });
+  } catch (err) {
+    console.error("[encrypt-only]", err);
+    res.status(500).json({ ok: false, error: err.message, code: "ENCRYPT_FAILED" });
+  }
+});
+
+/**
+ * Public API (no login / no JWT).
+ * 1) Look up subscriber by `to`
+ * 2) If exists + subscription active → encrypt + send encrypted mail
+ * 3) Otherwise → send the same content as plain (not encrypted)
+ *
+ * Body: { to, subject?, message?, fileBase64?, fileName?, mimeType? }
+ * Sends from system Gmail (GOOGLE_REFRESH_TOKEN / GMAIL_SENDER).
+ */
+router.post("/smart-send", validateBody(smartSendSchema), async (req, res) => {
+  try {
+    const { to, subject, message, fileBase64, fileName, mimeType } = req.body;
+
+    const systemRefresh = process.env.GOOGLE_REFRESH_TOKEN;
+    const systemFrom = process.env.GMAIL_SENDER;
+    if (!systemRefresh || !systemFrom) {
+      return res.status(503).json({
+        ok: false,
+        code: "MAILER_NOT_CONFIGURED",
+        error: "System Gmail is not configured on the server",
+      });
+    }
+
+    const hasFile = Boolean(fileBase64);
+    const subjectText =
+      subject || (hasFile ? fileName || "document.pdf" : "Message");
+
+    const subscriber = await findUserByEmail(User, to);
+    let shouldEncrypt = false;
+    let subscriptionExpiresAt = null;
+
+    if (subscriber) {
+      if (subscriber.claimed) {
+        await ensureUserSubscription(subscriber);
+      }
+      subscriptionExpiresAt = subscriber.subscriptionExpiresAt
+        ? new Date(subscriber.subscriptionExpiresAt).toISOString()
+        : null;
+      shouldEncrypt =
+        Boolean(subscriber.claimed) && isSubscriptionActive(subscriber);
+    }
+
+    if (!shouldEncrypt) {
+      try {
+        await sendPlainFileEmail({
+          to,
+          subject: subjectText,
+          message: message || "",
+          fileBase64: fileBase64 || null,
+          fileName: fileName || "document.pdf",
+          mimeType: mimeType || "application/pdf",
+        });
+      } catch (mailErr) {
+        return res.status(502).json({
+          ok: false,
+          encrypted: false,
+          subscriberExists: Boolean(subscriber),
+          subscriptionActive: false,
+          subscriptionExpiresAt,
+          error: mailErr.message || "Gmail send failed",
+          code: "GMAIL_SEND_FAILED",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        emailSent: true,
+        encrypted: false,
+        reason: !subscriber
+          ? "SUBSCRIBER_NOT_FOUND"
+          : !subscriber.claimed
+            ? "SUBSCRIBER_NOT_CLAIMED"
+            : "SUBSCRIPTION_INACTIVE",
+        subscriberExists: Boolean(subscriber),
+        subscriptionActive: false,
+        subscriptionExpiresAt,
+        subject: subjectText,
+        from: systemFrom,
+        to,
+      });
+    }
+
+    const { iron } = await ensureKeysOnUser(subscriber);
+    const { messageCipherText, contentKind, encryptedPackage } =
+      encryptMailPayload({
+        recipientUuid: subscriber.uuid,
+        recipientEmail: normalizeEmail(to),
+        iron,
+        message: message || "",
+        fileBase64: fileBase64 || null,
+        fileName: fileName || "document.pdf",
+        mimeType: mimeType || "application/pdf",
+      });
+
+    const attachmentBase64 =
+      encryptedPackage?.attachmentBase64 || encryptedPackage?.base64 || null;
+
+    try {
+      await sendEncryptedFileEmail({
+        to,
+        senderEmail: systemFrom,
+        subject: subjectText,
+        message: messageCipherText || "",
+        contentKind,
+        attachmentName: encryptedPackage?.fileName || null,
+        attachmentBase64,
+        encryptedPackageText: messageCipherText || "",
+        senderRefreshToken: systemRefresh,
+      });
+    } catch (mailErr) {
+      return res.status(502).json({
+        ok: false,
+        encrypted: true,
+        subscriberExists: true,
+        subscriptionActive: true,
+        subscriptionExpiresAt,
+        error: mailErr.message || "Gmail send failed",
+        code: "GMAIL_SEND_FAILED",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      emailSent: true,
+      encrypted: true,
+      reason: "SUBSCRIPTION_ACTIVE",
+      subscriberExists: true,
+      subscriptionActive: true,
+      subscriptionExpiresAt,
+      recipientUuid: subscriber.uuid,
+      contentKind,
+      subject: subjectText,
+      from: systemFrom,
+      to,
+    });
+  } catch (err) {
+    console.error("[smart-send]", err);
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+      code: "SMART_SEND_FAILED",
+    });
+  }
+});
 
 /**
  * One-shot API for other repos:

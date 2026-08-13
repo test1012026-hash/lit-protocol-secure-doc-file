@@ -394,8 +394,10 @@ function parseEncryptedPackage(packageText) {
     try {
       const raw = base64ToBytes(trimmed.slice(4)).toString("utf8");
       const parsed = packageFromCipherPayload(JSON.parse(raw));
+      console.log("parsed", parsed);
       if (parsed) return parsed;
-    } catch {
+    } catch(e) {
+      console.error("Error parsing encrypted package:", e);
       throw new Error(
         "Invalid ciphertext. Copy the full Message from the email (no missing characters).",
       );
@@ -409,6 +411,7 @@ function parseEncryptedPackage(packageText) {
     let payload;
     try {
       payload = JSON.parse(trimmed);
+      console.log("payload", payload);
     } catch {
       throw new Error("Invalid encrypted package JSON.");
     }
@@ -767,7 +770,8 @@ function encryptMailPayload({
   }
 
   const t0 = Date.now();
-  let messageCipherText = "";
+  let messageCipherText = null;
+  let fileCipherText = null;
   let encryptedPackage = null;
   let contentKind = "file";
 
@@ -788,7 +792,7 @@ function encryptMailPayload({
       mimeType: "application/json",
       kind: "message",
     });
-    messageCipherText = messagePackage.cipherText;
+    messageCipherText = messagePackage.cipherText || null;
     if (!hasFile) {
       encryptedPackage = messagePackage;
       contentKind = "message";
@@ -811,6 +815,9 @@ function encryptMailPayload({
       mimeType: mimeType || "application/pdf",
       kind: "file",
     });
+    // File packages are SDSB binary (base64); never reuse the message sds. token.
+    fileCipherText =
+      encryptedPackage.attachmentBase64 || encryptedPackage.base64 || null;
     contentKind = hasMessage ? "bundle" : "file";
   }
 
@@ -823,6 +830,7 @@ function encryptMailPayload({
 
   return {
     messageCipherText,
+    fileCipherText,
     contentKind,
     encryptedPackage,
   };

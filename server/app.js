@@ -7,6 +7,7 @@ const { connectDB } = require("./lib/mongoose");
 
 const authRoutes = require("./routes/auth");
 const fileRoutes = require("./routes/files");
+const publicRoutes = require("./routes/public");
 
 const app = express();
 app.use(cors());
@@ -42,6 +43,8 @@ app.use(async (req, res, next) => {
   }
 });
 
+// Public APIs first — no auth middleware on this router.
+app.use("/api/public", publicRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/files", fileRoutes);
 
