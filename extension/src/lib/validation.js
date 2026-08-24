@@ -9,7 +9,7 @@ export const emailSchema = z
 
 export const passwordSchema = z
   .string()
-  .min(8, "Password must be at least 8 characters")
+  .min(12, "Password must be at least 12 characters")
   .max(128, "Password is too long");
 
 export const loginSchema = z.object({
@@ -18,6 +18,20 @@ export const loginSchema = z.object({
 });
 
 export const signupSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+  acceptTerms: z
+    .boolean()
+    .refine((value) => value === true, {
+      message: "You must accept the Terms & Conditions to sign up",
+    }),
+  otp: z
+    .string()
+    .trim()
+    .regex(/^\d{4}$/, "Enter the 4-digit verification code"),
+});
+
+export const signupSendOtpSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
   acceptTerms: z
@@ -86,10 +100,10 @@ export const sendFileFormSchema = z
         path: ["file"],
       });
     }
-    if (file.size > 25 * 1024 * 1024) {
+    if (file.size > 20 * 1024 * 1024) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "PDF must be 25MB or smaller (Gmail limit)",
+        message: "PDF must be 20MB or smaller",
         path: ["file"],
       });
     }
@@ -111,8 +125,8 @@ export const receiveFileFormSchema = z.object({
     )
     .refine((file) => file.size > 0, "Selected file is empty")
     .refine(
-      (file) => file.size <= 25 * 1024 * 1024,
-      "Encrypted file must be 25MB or smaller",
+      (file) => file.size <= 20 * 1024 * 1024,
+      "Encrypted file must be 20MB or smaller",
     ),
 });
 

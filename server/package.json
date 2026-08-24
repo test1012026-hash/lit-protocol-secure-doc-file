@@ -7,10 +7,14 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "vercel-build": "echo No build step",
-    "gmail:token": "node scripts/get-gmail-refresh-token.js"
+    "gmail:token": "node scripts/get-gmail-refresh-token.js",
+    "seed:super-admin": "node scripts/seed-super-admin.js",
+    "migrate:rbac": "node scripts/migrate-rbac-users.js",
+    "migrate:seller-to-reseller": "node scripts/migrate-seller-to-reseller.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

@@ -116,9 +116,9 @@ export default function SendFile({ auth }) {
         file,
       });
 
-      if (values.file instanceof File && values.file.size > 18 * 1024 * 1024) {
+      if (values.file instanceof File && values.file.size > 15 * 1024 * 1024) {
         setStatus(
-          "Error: PDF should be under ~18 MB before encryption so the Gmail message stays under 25 MB.",
+          "Error: PDF should be under ~15 MB before encryption so the Gmail message stays within limits (max PDF 20 MB).",
         );
         return;
       }

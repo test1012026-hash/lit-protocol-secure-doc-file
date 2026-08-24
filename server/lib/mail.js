@@ -121,6 +121,32 @@ async function sendResetEmail(email, resetLink) {
   }
 }
 
+async function sendSignupOtpEmail(email, otp) {
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  const from = process.env.GMAIL_SENDER;
+  const code = String(otp || "").trim();
+  if (!refreshToken || !from) {
+    console.log("Signup OTP (Gmail not configured):", email, code);
+    return;
+  }
+
+  const subject = "Your SecureDocShare verification code";
+  const text = `Your SecureDocShare signup code is: ${code}\n\nThis code is valid for 10 minutes from when it was requested. If you request a new code, this one stops working.\n\nIf you did not request it, you can ignore this email.`;
+  const html = `
+    <h2>SecureDocShare</h2>
+    <p>Your signup verification code is:</p>
+    <p style="font-size:28px;letter-spacing:6px;font-weight:700">${code}</p>
+    <p>This code is valid for <b>10 minutes</b> from when it was requested. Requesting a new code invalidates the previous one.</p>
+  `;
+
+  try {
+    await sendEmail({ to: email, from, subject, text, html, refreshToken });
+  } catch (err) {
+    console.error("Failed to send signup OTP email:", err.message);
+    console.log("Signup OTP:", email, code);
+  }
+}
+
 async function sendEncryptedFileEmail({
   to,
   senderEmail,
@@ -299,6 +325,7 @@ async function sendPlainFileEmail({
 
 module.exports = {
   sendResetEmail,
+  sendSignupOtpEmail,
   sendEncryptedFileEmail,
   sendPlainFileEmail,
 };

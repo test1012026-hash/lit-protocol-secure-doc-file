@@ -24,6 +24,7 @@ const {
   parseEncryptedPackageFromBytes,
   parseDecryptedContent,
 } = require("../lib/secureCrypto");
+const { assertCanReceiveEncryptedMail, assertCanDecrypt } = require("../lib/recipientAccess");
 
 const router = express.Router();
 
@@ -182,12 +183,13 @@ router.post("/encrypt", async (req, res) => {
       return res.status(413).json({
         ok: false,
         code: "PAYLOAD_TOO_LARGE",
-        error: "File is too large for the encrypt API. Use a file under ~25 MB.",
+        error: "File is too large for the encrypt API. Use a file under ~20 MB.",
       });
     }
 
     const { recipient, created: recipientCreated } =
       await ensureRecipientByEmail(to);
+    assertCanReceiveEncryptedMail(recipient);
     const { iron, created: keysCreated } = await ensureKeysOnUser(recipient);
 
     const subjectText =
@@ -234,10 +236,10 @@ router.post("/encrypt", async (req, res) => {
     });
   } catch (err) {
     console.error("[public/encrypt]", err);
-    res.status(500).json({
+    res.status(err.status || 500).json({
       ok: false,
       error: err.message,
-      code: "ENCRYPT_FAILED",
+      code: err.code || "ENCRYPT_FAILED",
     });
   }
 });
@@ -343,6 +345,7 @@ router.post("/decrypt", async (req, res) => {
         error: "No account found for this email",
       });
     }
+    assertCanDecrypt(user);
 
     if (!hasCompleteRecipientKeys(user)) {
       return res.status(400).json({
@@ -400,15 +403,17 @@ router.post("/decrypt", async (req, res) => {
   } catch (err) {
     console.error("[public/decrypt]", err);
     const msg = String(err.message || err);
-    const status = /locked to a different|cannot decrypt|missing|Invalid|not a SecureDocShare|Corrupt|KEYS/i.test(
-      msg,
-    )
-      ? 400
-      : 500;
+    const status =
+      err.status ||
+      (/locked to a different|cannot decrypt|missing|Invalid|not a SecureDocShare|Corrupt|KEYS/i.test(
+        msg,
+      )
+        ? 400
+        : 500);
     res.status(status).json({
       ok: false,
       error: msg,
-      code: "DECRYPT_FAILED",
+      code: err.code || "DECRYPT_FAILED",
     });
   }
 });

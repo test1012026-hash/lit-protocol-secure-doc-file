@@ -3,15 +3,16 @@ const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const { OAuth2Client } = require("google-auth-library");
 const User = require("../models/User");
-const PasswordReset = require("../models/PasswordReset");
 const { sendResetEmail } = require("../lib/mail");
+const {
+  issueSignupOtp,
+  consumeSignupOtp,
+} = require("../lib/signupOtp");
 const { normalizeEmail } = require("../lib/email");
 const {
   applyEncryptedEmail,
   getPlainEmail,
   findUserByEmail,
-  hashEmail,
-  encryptEmail,
 } = require("../lib/emailCrypto");
 const {
   // getGmailAuthUrl,
@@ -32,13 +33,17 @@ const {
 } = require("../lib/subscription");
 const {
   issueAuthTokens,
-  hashToken,
-  verifyRefreshToken,
+  verifySessionToken,
+  clearSessionToken,
+  sendRelogin,
+  RELOGIN_STATUS,
+  DEFAULT_TOKEN_HOURS,
 } = require("../lib/tokens");
 const authMiddleware = require("../middleware/auth");
 const { validateBody, validateQuery } = require("../middleware/validate");
 const {
   signupSchema,
+  signupSendOtpSchema,
   loginSchema,
   googleLoginSchema,
   passwordResetRequestSchema,
@@ -60,13 +65,14 @@ function appUrl() {
   ).replace(/\/$/, "");
 }
 
-async function attachAuthTokens(user) {
-  const issued = issueAuthTokens(user);
-  user.refreshTokenHash = issued.refreshTokenHash;
-  await user.save();
+async function attachAuthTokens(user, options = {}) {
+  const issued = await issueAuthTokens(user, {
+    expiresInHours: options.expiresInHours || DEFAULT_TOKEN_HOURS,
+  });
   return {
     token: issued.token,
     refreshToken: issued.refreshToken,
+    expiresAt: issued.expiresAt,
   };
 }
 
@@ -81,7 +87,13 @@ function mergeGrantedScopes(existing, incoming) {
 function userPayload(user, tokens) {
   return {
     token: tokens.token,
-    refreshToken: tokens.refreshToken,
+    refreshToken: tokens.refreshToken || tokens.token,
+    createdAt: tokens.createdAt
+      ? new Date(tokens.createdAt).toISOString()
+      : null,
+    expiresAt: tokens.expiresAt
+      ? new Date(tokens.expiresAt).toISOString()
+      : null,
     uuid: user.uuid,
     email: getPlainEmail(user),
     hasPassword: Boolean(user.passwordHash),
@@ -109,12 +121,38 @@ function hashResetToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
+router.post(
+  "/signup/send-otp",
+  validateBody(signupSendOtpSchema),
+  async (req, res) => {
+    try {
+      const result = await issueSignupOtp(req.body.email);
+      res.json(result);
+    } catch (err) {
+      const status = err.status || 500;
+      res.status(status).json({
+        error: err.message,
+        code: err.code || undefined,
+      });
+    }
+  },
+);
+
 router.post("/signup", validateBody(signupSchema), async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
-    const { password } = req.body;
+    const { password, otp } = req.body;
+
+    await consumeSignupOtp(email, otp);
 
     let user = await findUserByEmail(User, email);
+    if (user?.deletedAt) {
+      return res.status(403).json({
+        error:
+          "This account was removed. Contact your administrator to restore access.",
+        code: "ACCOUNT_DELETED",
+      });
+    }
     if (user?.claimed)
       return res
         .status(409)
@@ -126,11 +164,13 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
       user.passwordHash = passwordHash;
       user.claimed = true;
       user.termsAndConditions = true;
+      user.onboardingComplete = false;
     } else {
       user = new User({
         passwordHash,
         claimed: true,
         termsAndConditions: true,
+        onboardingComplete: false,
       });
       applyEncryptedEmail(user, email);
     }
@@ -139,7 +179,11 @@ router.post("/signup", validateBody(signupSchema), async (req, res) => {
     const tokens = await attachAuthTokens(user);
     res.json(userPayload(user, tokens));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({
+      error: err.message,
+      code: err.code || undefined,
+    });
   }
 });
 
@@ -150,6 +194,13 @@ router.post("/login", validateBody(loginSchema), async (req, res) => {
     const user = await findUserByEmail(User, email, { claimed: true });
     if (!user || !user.passwordHash)
       return res.status(401).json({ error: "Invalid credentials" });
+
+    if (user.deletedAt) {
+      return res.status(403).json({
+        error: "This account was removed and cannot sign in.",
+        code: "ACCOUNT_DELETED",
+      });
+    }
 
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
@@ -180,6 +231,15 @@ async function upsertGoogleUser(
   }
 
   const isNewClaim = !user || !user.claimed;
+
+  if (user?.deletedAt) {
+    const err = new Error(
+      "This account was removed and cannot sign in. Contact your administrator.",
+    );
+    err.status = 403;
+    err.code = "ACCOUNT_DELETED";
+    throw err;
+  }
 
   // Google Log in: existing claimed accounts only — never auto-create.
   if (intent !== "signup" && isNewClaim) {
@@ -308,6 +368,11 @@ router.post(
   },
 );
 
+function clearPasswordReset(user) {
+  user.passwordResetTokenHash = null;
+  user.passwordResetExpiresAt = null;
+}
+
 router.post(
   "/password-reset/request",
   validateBody(passwordResetRequestSchema),
@@ -322,20 +387,9 @@ router.post(
           .json({ error: "No account found for this email" });
 
       const token = generateResetToken();
-      const tokenHash = hashResetToken(token);
-      const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
-      const emailHash = hashEmail(email);
-
-      await PasswordReset.findOneAndUpdate(
-        { emailHash },
-        {
-          email: encryptEmail(email),
-          emailHash,
-          tokenHash,
-          expiresAt,
-        },
-        { upsert: true, new: true },
-      );
+      user.passwordResetTokenHash = hashResetToken(token);
+      user.passwordResetExpiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+      await user.save();
 
       const resetLink = `${appUrl()}/reset-password?token=${token}&email=${encodeURIComponent(email)}`;
       await sendResetEmail(email, resetLink);
@@ -356,14 +410,12 @@ router.get(
     try {
       const email = normalizeEmail(req.query.email);
       const { token } = req.query;
-      const emailHash = hashEmail(email);
-      let record = await PasswordReset.findOne({ emailHash });
-      if (!record) {
-        // Legacy plaintext rows
-        record = await PasswordReset.findOne({ email });
-      }
+      const user = await findUserByEmail(User, email, { claimed: true });
 
-      if (!record || record.tokenHash !== hashResetToken(token)) {
+      if (
+        !user?.passwordResetTokenHash ||
+        user.passwordResetTokenHash !== hashResetToken(token)
+      ) {
         return res.status(400).json({
           valid: false,
           expired: false,
@@ -371,8 +423,12 @@ router.get(
         });
       }
 
-      if (record.expiresAt < new Date()) {
-        await PasswordReset.deleteOne({ _id: record._id });
+      if (
+        !user.passwordResetExpiresAt ||
+        user.passwordResetExpiresAt < new Date()
+      ) {
+        clearPasswordReset(user);
+        await user.save();
         return res.status(400).json({
           valid: false,
           expired: true,
@@ -381,7 +437,7 @@ router.get(
         });
       }
 
-      const msLeft = record.expiresAt.getTime() - Date.now();
+      const msLeft = user.passwordResetExpiresAt.getTime() - Date.now();
       res.json({
         valid: true,
         expired: false,
@@ -402,33 +458,30 @@ router.post(
       const email = normalizeEmail(req.body.email);
       const { token, password } = req.body;
 
-      const emailHash = hashEmail(email);
-      let record = await PasswordReset.findOne({ emailHash });
-      if (!record) {
-        record = await PasswordReset.findOne({ email });
-      }
-      if (!record || record.tokenHash !== hashResetToken(token)) {
+      const user = await findUserByEmail(User, email, { claimed: true });
+      if (
+        !user?.passwordResetTokenHash ||
+        user.passwordResetTokenHash !== hashResetToken(token)
+      ) {
         return res.status(400).json({
           error: "This reset link is invalid. Please request a new one.",
         });
       }
-      if (record.expiresAt < new Date()) {
-        await PasswordReset.deleteOne({ _id: record._id });
+      if (
+        !user.passwordResetExpiresAt ||
+        user.passwordResetExpiresAt < new Date()
+      ) {
+        clearPasswordReset(user);
+        await user.save();
         return res.status(400).json({
           error:
             "This reset link has expired (links are valid for 30 minutes). Please request a new one.",
         });
       }
 
-      const user = await findUserByEmail(User, email, { claimed: true });
-      if (!user)
-        return res
-          .status(404)
-          .json({ error: "No account found for this email" });
-
       user.passwordHash = await bcrypt.hash(password, 12);
+      clearPasswordReset(user);
       await user.save();
-      await PasswordReset.deleteOne({ _id: record._id });
 
       await ensureUserSubscription(user);
       const tokens = await attachAuthTokens(user);
@@ -439,56 +492,44 @@ router.post(
   },
 );
 
-/** Exchange a valid refresh token for a new access + refresh pair. */
+/**
+ * Session tokens are DB-backed and last ~8h.
+ * Refresh no longer extends JWT — if the session is still valid, return it;
+ * otherwise require re-login (440).
+ */
 router.post("/refresh", validateBody(refreshTokenSchema), async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    let payload;
+    let session;
     try {
-      payload = verifyRefreshToken(refreshToken);
+      session = await verifySessionToken(refreshToken);
     } catch (err) {
-      if (err.name === "TokenExpiredError") {
-        return res.status(401).json({
-          error: "Refresh token expired. Please log in again.",
-          code: "REFRESH_EXPIRED",
-        });
+      if (err.status === RELOGIN_STATUS || err.code === "TOKEN_EXPIRED" || err.code === "TOKEN_INVALID") {
+        return sendRelogin(res, err.code || "RELOGIN_REQUIRED");
       }
-      return res.status(401).json({
-        error: "Invalid refresh token. Please log in again.",
-        code: "REFRESH_INVALID",
-      });
+      if (err.status === 403) {
+        return res.status(403).json({ error: err.message, code: err.code });
+      }
+      return sendRelogin(res, "TOKEN_INVALID");
     }
 
-    const user = await User.findOne({ uuid: payload.uuid, claimed: true });
-    if (!user) {
-      return res.status(401).json({
-        error: "Account not found. Please log in again.",
-        code: "REFRESH_INVALID",
-      });
-    }
-
-    const incomingHash = hashToken(refreshToken);
-    if (!user.refreshTokenHash || user.refreshTokenHash !== incomingHash) {
-      return res.status(401).json({
-        error: "Refresh token revoked. Please log in again.",
-        code: "REFRESH_REVOKED",
-      });
-    }
-
-    await ensureUserSubscription(user);
-    const tokens = await attachAuthTokens(user);
-    res.json(userPayload(user, tokens));
+    await ensureUserSubscription(session.user);
+    return res.json(
+      userPayload(session.user, {
+        token: refreshToken,
+        refreshToken,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+      }),
+    );
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
 router.post("/logout", authMiddleware, async (req, res) => {
   try {
-    await User.updateOne(
-      { uuid: req.user.uuid },
-      { $unset: { refreshTokenHash: 1 } },
-    );
+    await clearSessionToken(req.user.uuid);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -720,7 +761,11 @@ router.get("/subscription", authMiddleware, async (req, res) => {
     const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
     if (!user) return res.status(404).json({ error: "User not found" });
     await ensureUserSubscription(user);
-    res.json(subscriptionPayload(user));
+    res.json({
+      ...subscriptionPayload(user),
+      email: getPlainEmail(user),
+      uuid: user.uuid,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -879,6 +924,279 @@ router.get("/gmail/callback", async (req, res) => {
   } catch (err) {
     console.error("Gmail callback error:", err);
     fail(err.message || "Unexpected error");
+  }
+});
+
+// ─── Outlook / client OAuth (Google, Microsoft, Yahoo) ───────────────────────
+const userOAuth = require("../lib/userOAuth");
+
+async function upsertUserFromOAuth(
+  profile,
+  { intent = "login", acceptTerms = false, provider = "google" } = {},
+) {
+  const email = normalizeEmail(profile.email);
+  let user = await findUserByEmail(User, email);
+  const isNewClaim = !user || !user.claimed;
+
+  if (user?.deletedAt) {
+    const err = new Error(
+      "This account was removed and cannot sign in. Contact your administrator.",
+    );
+    err.status = 403;
+    err.code = "ACCOUNT_DELETED";
+    throw err;
+  }
+
+  if (intent !== "signup" && isNewClaim) {
+    const err = new Error(
+      "You are not able to log in. Please sign up first.",
+    );
+    err.status = 404;
+    err.code = "ACCOUNT_NOT_FOUND";
+    throw err;
+  }
+
+  if (isNewClaim && !acceptTerms) {
+    const err = new Error(
+      "You must accept the Terms & Conditions to create an account",
+    );
+    err.status = 400;
+    err.code = "TERMS_REQUIRED";
+    throw err;
+  }
+
+  if (intent === "signup" && user?.claimed) {
+    const err = new Error(
+      "An account with this email already exists. Log in instead.",
+    );
+    err.status = 409;
+    err.code = "ACCOUNT_EXISTS";
+    throw err;
+  }
+
+  const oauthId =
+    provider === "google" && profile.subject
+      ? String(profile.subject)
+      : profile.subject
+        ? `${provider}:${profile.subject}`
+        : null;
+
+  if (!user) {
+    user = new User({
+      googleId: oauthId,
+      claimed: true,
+      termsAndConditions: Boolean(acceptTerms),
+      name: profile.name ? String(profile.name).slice(0, 200) : "",
+      onboardingComplete: intent === "signup" ? false : true,
+    });
+    applyEncryptedEmail(user, email);
+  } else {
+    applyEncryptedEmail(user, email);
+    user.claimed = true;
+    if (acceptTerms) user.termsAndConditions = true;
+    if (intent === "signup" && !user.onboardingComplete) {
+      user.onboardingComplete = false;
+    }
+    if (oauthId && (!user.googleId || provider === "google")) {
+      user.googleId = oauthId;
+    }
+    if (profile.name && !user.name) {
+      user.name = String(profile.name).slice(0, 200);
+    }
+  }
+
+  await finalizeClaimedUser(user);
+  return user;
+}
+
+function redirectUserOAuthError(returnOrigin, returnPath, message) {
+  const path = returnPath || "/oauth-dialog-callback.html";
+  const url = new URL(path, `${returnOrigin}/`);
+  url.searchParams.set("oauth_error", message || "SSO failed");
+  return url.toString();
+}
+
+router.get("/oauth/providers", (req, res) => {
+  return res.json({
+    providers: userOAuth.configuredProviders(),
+  });
+});
+
+router.get("/oauth/:provider/start", (req, res) => {
+  try {
+    const provider = String(req.params.provider || "").toLowerCase();
+    if (!userOAuth.PROVIDERS.includes(provider)) {
+      return res.status(404).json({ error: "Unknown SSO provider" });
+    }
+    const returnOrigin = String(
+      req.query.returnOrigin || req.get("origin") || "",
+    ).replace(/\/$/, "");
+    const returnPath = String(
+      req.query.returnPath || "/oauth-dialog-callback.html",
+    );
+    const intent = req.query.intent === "signup" ? "signup" : "login";
+    const acceptTerms =
+      req.query.acceptTerms === "1" ||
+      req.query.acceptTerms === "true" ||
+      req.query.acceptTerms === true;
+
+    if (intent === "signup" && !acceptTerms) {
+      return res.redirect(
+        redirectUserOAuthError(
+          returnOrigin,
+          returnPath,
+          "You must accept the Terms & Conditions",
+        ),
+      );
+    }
+
+    const { url } = userOAuth.buildAuthorizeUrl(provider, {
+      returnOrigin,
+      returnPath,
+      intent,
+      acceptTerms,
+    });
+    return res.redirect(url);
+  } catch (err) {
+    const status = err.status || 500;
+    const origin = String(req.query.returnOrigin || "").replace(/\/$/, "");
+    const returnPath = String(
+      req.query.returnPath || "/oauth-dialog-callback.html",
+    );
+    if (origin && req.accepts("html")) {
+      return res.redirect(
+        redirectUserOAuthError(origin, returnPath, err.message),
+      );
+    }
+    return res.status(status).json({
+      error: err.message,
+      code: err.code || "OAUTH_START_FAILED",
+    });
+  }
+});
+
+router.get("/oauth/:provider/callback", async (req, res) => {
+  let returnOrigin = String(
+    process.env.ADDIN_HTTPS_ORIGIN || "https://localhost:3000",
+  ).replace(/\/$/, "");
+  let returnPath = "/oauth-dialog-callback.html";
+  try {
+    const provider = String(req.params.provider || "").toLowerCase();
+    if (!userOAuth.PROVIDERS.includes(provider)) {
+      return res.status(404).send("Unknown SSO provider");
+    }
+
+    if (req.query.error) {
+      try {
+        if (req.query.state) {
+          const peek = userOAuth.verifyState(String(req.query.state));
+          if (peek?.o) returnOrigin = peek.o;
+          if (peek?.path) returnPath = peek.path;
+        }
+      } catch {
+        /* ignore */
+      }
+      return res.redirect(
+        redirectUserOAuthError(
+          returnOrigin,
+          returnPath,
+          String(req.query.error_description || req.query.error),
+        ),
+      );
+    }
+
+    const code = String(req.query.code || "");
+    const stateToken = String(req.query.state || "");
+    if (!code || !stateToken) {
+      return res.redirect(
+        redirectUserOAuthError(returnOrigin, returnPath, "Missing OAuth code"),
+      );
+    }
+
+    const state = userOAuth.verifyState(stateToken);
+    if (state.typ !== "user_oauth" || state.p !== provider) {
+      return res.redirect(
+        redirectUserOAuthError(returnOrigin, returnPath, "Invalid OAuth state"),
+      );
+    }
+    returnOrigin = state.o;
+    returnPath = state.path || "/oauth-dialog-callback.html";
+    const intent = state.intent === "signup" ? "signup" : "login";
+    const acceptTerms = Boolean(state.terms);
+
+    const redirectUri = userOAuth.callbackUri(provider);
+    const tokens = await userOAuth.exchangeCode(provider, code, redirectUri);
+    if (!tokens.access_token) {
+      return res.redirect(
+        redirectUserOAuthError(
+          returnOrigin,
+          returnPath,
+          "No access token from provider",
+        ),
+      );
+    }
+
+    const profile = await userOAuth.fetchProfile(
+      provider,
+      tokens.access_token,
+    );
+    if (!profile.email) {
+      return res.redirect(
+        redirectUserOAuthError(
+          returnOrigin,
+          returnPath,
+          "Provider did not return an email address",
+        ),
+      );
+    }
+
+    const user = await upsertUserFromOAuth(profile, {
+      intent,
+      acceptTerms,
+      provider,
+    });
+
+    const ticket = userOAuth.signUserOAuthTicket(user.uuid);
+    const dest = new URL(returnPath, `${returnOrigin}/`);
+    dest.searchParams.set("oauth_ticket", ticket);
+    return res.redirect(dest.toString());
+  } catch (err) {
+    console.error("user oauth callback:", err.message);
+    return res.redirect(
+      redirectUserOAuthError(
+        returnOrigin,
+        returnPath,
+        err.message || "SSO failed",
+      ),
+    );
+  }
+});
+
+router.post("/oauth/complete", async (req, res) => {
+  try {
+    const ticket = String(req.body?.ticket || req.body?.oauth_ticket || "");
+    if (!ticket) {
+      return res.status(400).json({
+        error: "Missing OAuth ticket",
+        code: "OAUTH_TICKET_REQUIRED",
+      });
+    }
+    const payload = userOAuth.verifyUserOAuthTicket(ticket);
+    const user = await User.findOne({ uuid: payload.uuid });
+    if (!user || user.deletedAt || !user.claimed) {
+      return res.status(401).json({
+        error: "Invalid or expired OAuth session",
+        code: "OAUTH_TICKET_INVALID",
+      });
+    }
+    const tokens = await attachAuthTokens(user);
+    return res.json(userPayload(user, tokens));
+  } catch (err) {
+    const status = err.status || 401;
+    return res.status(status).json({
+      error: err.message || "OAuth complete failed",
+      code: err.code || "OAUTH_COMPLETE_FAILED",
+    });
   }
 });
 

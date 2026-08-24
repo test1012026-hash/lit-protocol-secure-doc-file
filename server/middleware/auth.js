@@ -1,8 +1,10 @@
 const {
-  verifyAccessToken,
+  verifySessionToken,
+  sendRelogin,
+  RELOGIN_STATUS,
 } = require("../lib/tokens");
 
-module.exports = function authMiddleware(req, res, next) {
+module.exports = async function authMiddleware(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!token) {
@@ -13,18 +15,15 @@ module.exports = function authMiddleware(req, res, next) {
   }
 
   try {
-    req.user = verifyAccessToken(token);
+    req.user = await verifySessionToken(token);
     next();
   } catch (err) {
-    if (err.name === "TokenExpiredError") {
-      return res.status(401).json({
-        error: "Access token expired",
-        code: "TOKEN_EXPIRED",
-      });
+    if (err.status === RELOGIN_STATUS || err.code === "TOKEN_EXPIRED" || err.code === "TOKEN_INVALID") {
+      return sendRelogin(res, err.code || "RELOGIN_REQUIRED");
     }
-    return res.status(401).json({
-      error: "Invalid or expired token",
-      code: "TOKEN_INVALID",
-    });
+    if (err.status === 403) {
+      return res.status(403).json({ error: err.message, code: err.code });
+    }
+    return sendRelogin(res, "TOKEN_INVALID");
   }
 };

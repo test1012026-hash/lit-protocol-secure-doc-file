@@ -61,7 +61,7 @@ export async function sendEncryptedEmailViaGmail({
   // Gmail's documented limit is ~25MB for the total encoded message.
   if (mimeBlob.size > 24.5 * 1024 * 1024) {
     throw new Error(
-      `Message is ${sizeMb} MB after encryption (Gmail limit ~25 MB). Use a smaller PDF.`,
+      `Message is ${sizeMb} MB after encryption (Gmail limit ~25 MB). Use a PDF of 20 MB or smaller.`,
     );
   }
 
@@ -87,7 +87,7 @@ export async function sendEncryptedEmailViaGmail({
       )
     ) {
       throw new Error(
-        "Attachment exceeds Gmail's 25MB limit. Use a PDF of 25MB or smaller.",
+        "Attachment exceeds Gmail's size limit. Use a PDF of 20MB or smaller.",
       );
     }
     if (res.status === 401 || res.status === 403) {

@@ -118,8 +118,10 @@ largeFileClient.interceptors.response.use(
 );
 
 export const api = {
-  signup: (email, password, acceptTerms) =>
-    client.post("/auth/signup", { email, password, acceptTerms }),
+  sendSignupOtp: (email, acceptTerms) =>
+    client.post("/auth/signup/send-otp", { email, acceptTerms }),
+  signup: (email, password, acceptTerms, otp) =>
+    client.post("/auth/signup", { email, password, acceptTerms, otp }),
   login: (email, password) => client.post("/auth/login", { email, password }),
   loginGoogle: (idToken) => client.post("/auth/login/google", { idToken }),
   loginGoogleFull: (payload) => client.post("/auth/login/google", payload),

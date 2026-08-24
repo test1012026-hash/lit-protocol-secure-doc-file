@@ -1,7 +1,7 @@
 /**
- * Free trial: 90 days from account claim/creation.
- * After expiry, sending is blocked until subscription is renewed.
- * Active = subscriptionExpiresAt is set and in the future.
+ * Subscription: 90-day (3 month) periods via subscriptionExpiresAt.
+ * New users get FREE_TRIAL_DAYS from claim/creation (default 90).
+ * After expiry, sending is blocked until an admin extends the period.
  */
 
 const FREE_TRIAL_DAYS = Number(process.env.FREE_TRIAL_DAYS || 90);
@@ -56,9 +56,24 @@ function subscriptionPayload(user) {
 
 function subscriptionBlockedError() {
   return {
-    error: `Your free ${FREE_TRIAL_DAYS}-day trial has ended. Subscribe to continue sending secure mail.`,
+    error: `Your ${FREE_TRIAL_DAYS}-day subscription period has ended. Renew to continue sending secure mail.`,
     code: "SUBSCRIPTION_EXPIRED",
   };
+}
+
+/**
+ * Extend from max(now, current expiry) by another FREE_TRIAL_DAYS (default 90).
+ * periods = how many 90-day blocks to add (default 1).
+ */
+function extendSubscription(user, periods = 1) {
+  const n = Math.max(1, Math.min(12, Number(periods) || 1));
+  const base =
+    user.subscriptionExpiresAt &&
+    new Date(user.subscriptionExpiresAt).getTime() > Date.now()
+      ? new Date(user.subscriptionExpiresAt)
+      : new Date();
+  user.subscriptionExpiresAt = addDays(base, FREE_TRIAL_DAYS * n);
+  return user;
 }
 
 module.exports = {
@@ -68,4 +83,5 @@ module.exports = {
   isSubscriptionActive,
   subscriptionPayload,
   subscriptionBlockedError,
+  extendSubscription,
 };

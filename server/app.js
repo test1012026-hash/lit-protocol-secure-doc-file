@@ -3,14 +3,28 @@ const path = require("path");
 const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 const { connectDB } = require("./lib/mongoose");
 
 const authRoutes = require("./routes/auth");
 const fileRoutes = require("./routes/files");
 const publicRoutes = require("./routes/public");
+const adminRoutes = require("./routes/admin");
 
 const app = express();
-app.use(cors());
+
+const corsOrigins = String(process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: corsOrigins.length ? corsOrigins : true,
+    credentials: true,
+  }),
+);
+app.use(cookieParser());
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: true, limit: "40mb" }));
 
@@ -47,13 +61,14 @@ app.use(async (req, res, next) => {
 app.use("/api/public", publicRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/files", fileRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Express body-parser throws this before route handlers run.
 app.use((err, req, res, next) => {
   if (err?.type === "entity.too.large" || err?.name === "PayloadTooLargeError") {
     return res.status(413).json({
       error:
-        "File is too large for the encrypt API. Use a PDF under ~25 MB.",
+        "File is too large for the encrypt API. Use a PDF under ~20 MB.",
       code: "PAYLOAD_TOO_LARGE",
     });
   }

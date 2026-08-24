@@ -32,6 +32,11 @@ const {
   parseEncryptedPackageFromBytes,
   parseDecryptedContent,
 } = require("../lib/secureCrypto");
+const { assertCanReceiveEncryptedMail } = require("../lib/recipientAccess");
+const {
+  assertCanEncryptOrSend,
+  assertCanDecrypt,
+} = require("../lib/accountAccess");
 
 const router = express.Router();
 
@@ -88,6 +93,8 @@ router.post(
         recipientUuid: recipient.uuid,
         recipientEmail: getPlainEmail(recipient),
         recipientClaimed: recipient.claimed,
+        blocked: Boolean(recipient.blocked),
+        deleted: Boolean(recipient.deletedAt),
         iron: recipient.iron || null,
       });
     } catch (err) {
@@ -175,6 +182,7 @@ router.post(
       if (!sender) {
         return res.status(401).json({ error: "Sender account not found" });
       }
+      assertCanEncryptOrSend(sender);
       await ensureUserSubscription(sender);
       if (!isSubscriptionActive(sender)) {
         return res.status(403).json(subscriptionBlockedError());
@@ -183,6 +191,7 @@ router.post(
       await ensureKeysOnUser(sender);
 
       const recipient = await ensureRecipientByEmail(recipientEmail);
+      assertCanReceiveEncryptedMail(recipient);
       const { iron } = await ensureKeysOnUser(recipient);
 
       const {
@@ -224,7 +233,7 @@ router.post(
       });
     } catch (err) {
       console.error("[encrypt]", err);
-      res.status(500).json({ error: err.message });
+      res.status(err.status || 500).json({ error: err.message, code: err.code });
     }
   },
 );
@@ -244,6 +253,7 @@ router.post(
       if (!user) {
         return res.status(401).json({ error: "Account not found" });
       }
+      assertCanDecrypt(user);
       if (!hasCompleteRecipientKeys(user)) {
         return res.status(400).json({
           error:
@@ -278,12 +288,14 @@ router.post(
       });
     } catch (err) {
       console.error("[decrypt]", err);
-      const status = /locked to a different|cannot decrypt|missing/i.test(
-        String(err.message || ""),
-      )
-        ? 400
-        : 500;
-      res.status(status).json({ error: err.message });
+      const status =
+        err.status ||
+        (/locked to a different|cannot decrypt|missing/i.test(
+          String(err.message || ""),
+        )
+          ? 400
+          : 500);
+      res.status(status).json({ error: err.message, code: err.code });
     }
   },
 );
@@ -300,6 +312,7 @@ router.post("/encrypt-only", validateBody(smartSendSchema), async (req, res) => 
     const { to, subject, message, fileBase64, fileName, mimeType } = req.body;
 
     const recipient = await ensureRecipientByEmail(to);
+    assertCanReceiveEncryptedMail(recipient);
     const subjectText =
       subject ||
       (Boolean(fileBase64) ? fileName || "document.pdf" : "Secure message");
@@ -524,6 +537,7 @@ router.post(
           error: "Sender account not found",
         });
       }
+      assertCanEncryptOrSend(sender);
 
       await ensureUserSubscription(sender);
       if (!isSubscriptionActive(sender)) {
@@ -547,6 +561,7 @@ router.post(
         await findUserByEmail(User, recipientEmail),
       );
       const recipient = await ensureRecipientByEmail(recipientEmail);
+      assertCanReceiveEncryptedMail(recipient);
       const { iron, created: keysCreated } = await ensureKeysOnUser(recipient);
 
       const { messageCipherText, contentKind, encryptedPackage } =
@@ -620,10 +635,10 @@ router.post(
       });
     } catch (err) {
       console.error("[secure-send]", err);
-      res.status(500).json({
+      res.status(err.status || 500).json({
         ok: false,
         error: err.message,
-        code: "SECURE_SEND_FAILED",
+        code: err.code || "SECURE_SEND_FAILED",
       });
     }
   },
@@ -649,6 +664,7 @@ router.post(
         clientSend,
       } = req.body;
       const recipient = await ensureRecipientByEmail(recipientEmail);
+      assertCanReceiveEncryptedMail(recipient);
       if (recipientUuid && recipient.uuid !== recipientUuid) {
         return res.status(400).json({
           error:
@@ -659,6 +675,7 @@ router.post(
       if (!sender) {
         return res.status(401).json({ error: "Sender account not found" });
       }
+      assertCanEncryptOrSend(sender);
       await ensureUserSubscription(sender);
       if (!isSubscriptionActive(sender)) {
         return res.status(403).json(subscriptionBlockedError());
@@ -735,7 +752,7 @@ router.post(
       });
     } catch (err) {
       console.log("err -->", err);
-      res.status(500).json({ error: err.message });
+      res.status(err.status || 500).json({ error: err.message, code: err.code });
     }
   },
 );

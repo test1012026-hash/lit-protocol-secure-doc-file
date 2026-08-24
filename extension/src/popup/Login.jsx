@@ -4,13 +4,16 @@ import {
   getGoogleOAuthSetup,
   googleSignInWithFullAccess,
 } from "../lib/googleAuth";
-import { loginSchema, parseOrThrow, signupSchema } from "../lib/validation";
+import { loginSchema, parseOrThrow, signupSchema, signupSendOtpSchema } from "../lib/validation";
 import ResetPassword from "./ResetPassword";
 
 export default function Login({ onLogin }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpHint, setOtpHint] = useState("");
   const [acceptTerms, setAcceptTerms] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,18 +24,57 @@ export default function Login({ onLogin }) {
     setLoading(true);
     try {
       if (mode === "signup") {
+        if (!otpSent) {
+          parseOrThrow(signupSendOtpSchema, {
+            email,
+            password,
+            acceptTerms,
+          });
+          const { data } = await api.sendSignupOtp(email, true);
+          setOtpSent(true);
+          setOtp("");
+          setOtpHint(
+            data?.devOtp
+              ? `Dev code: ${data.devOtp} (valid 10 min)`
+              : "Code sent. Valid for 10 minutes — a new request replaces the old code.",
+          );
+          return;
+        }
         const values = parseOrThrow(signupSchema, {
           email,
           password,
           acceptTerms,
+          otp,
         });
-        const { data } = await api.signup(values.email, values.password, true);
+        const { data } = await api.signup(
+          values.email,
+          values.password,
+          true,
+          values.otp,
+        );
         await onLogin(data);
       } else {
         const values = parseOrThrow(loginSchema, { email, password });
         const { data } = await api.login(values.email, values.password);
         await onLogin(data);
       }
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resendOtp = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const { data } = await api.sendSignupOtp(email, true);
+      setOtpHint(
+        data?.devOtp
+          ? `Dev code: ${data.devOtp} (valid 10 min)`
+          : "New code sent. Valid for 10 minutes — previous code is invalid.",
+      );
     } catch (err) {
       setError(err.response?.data?.error || err.message);
     } finally {
@@ -111,6 +153,9 @@ export default function Login({ onLogin }) {
     setMode(next);
     setError("");
     setAcceptTerms(false);
+    setOtpSent(false);
+    setOtp("");
+    setOtpHint("");
   };
 
   return (
@@ -124,7 +169,14 @@ export default function Login({ onLogin }) {
         className="field"
         placeholder="Email"
         value={email}
-        onChange={(e) => setEmail(e.target.value)}
+        onChange={(e) => {
+          setEmail(e.target.value);
+          if (mode === "signup") {
+            setOtpSent(false);
+            setOtp("");
+            setOtpHint("");
+          }
+        }}
         onKeyDown={onKeyDown}
         autoComplete="email"
       />
@@ -157,6 +209,31 @@ export default function Login({ onLogin }) {
           </span>
         </label>
       )}
+      {mode === "signup" && otpSent && (
+        <>
+          <input
+            className="field"
+            placeholder="4-digit code"
+            value={otp}
+            onChange={(e) =>
+              setOtp(e.target.value.replace(/\D/g, "").slice(0, 4))
+            }
+            onKeyDown={onKeyDown}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={4}
+          />
+          {otpHint ? <p className="brand-sub">{otpHint}</p> : null}
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={resendOtp}
+            disabled={loading || googleLoading}
+          >
+            Resend code
+          </button>
+        </>
+      )}
       <button
         className="btn btn-primary"
         onClick={submit}
@@ -167,10 +244,14 @@ export default function Login({ onLogin }) {
         {loading
           ? mode === "login"
             ? "Signing in..."
-            : "Creating account..."
+            : otpSent
+              ? "Creating account..."
+              : "Sending code..."
           : mode === "login"
-          ? "Log in"
-          : "Sign up"}
+            ? "Log in"
+            : otpSent
+              ? "Verify & sign up"
+              : "Send verification code"}
       </button>
       <button
         className="btn btn-secondary"

@@ -9,7 +9,7 @@ const emailSchema = z
 
 const passwordSchema = z
   .string()
-  .min(8, "Password must be at least 8 characters")
+  .min(12, "Password must be at least 12 characters")
   .max(128, "Password is too long");
 
 const uuidSchema = z.string().uuid("Invalid UUID");
@@ -17,6 +17,19 @@ const uuidSchema = z.string().uuid("Invalid UUID");
 const signupSchema = z.object({
   email: emailSchema,
   password: passwordSchema,
+  acceptTerms: z
+    .boolean()
+    .refine((value) => value === true, {
+      message: "You must accept the Terms & Conditions to sign up",
+    }),
+  otp: z
+    .string()
+    .trim()
+    .regex(/^\d{4}$/, "Enter the 4-digit verification code"),
+});
+
+const signupSendOtpSchema = z.object({
+  email: emailSchema,
   acceptTerms: z
     .boolean()
     .refine((value) => value === true, {
@@ -234,8 +247,109 @@ const smartSendSchema = z
     }
   });
 
+const adminPasswordSchema = z
+  .string()
+  .min(12, "Password must be at least 12 characters")
+  .max(128, "Password is too long");
+
+const adminLoginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, "Password is required"),
+});
+
+const adminInviteSchema = z.object({
+  email: emailSchema,
+  role: z.enum(["reseller", "group_admin", "subscriber"]).default("subscriber"),
+  name: z.string().trim().max(200).optional().default(""),
+  groupName: z
+    .string()
+    .trim()
+    .min(2, "Group name must be at least 2 characters")
+    .max(120)
+    .optional(),
+  groupDescription: z.string().trim().max(500).optional().default(""),
+});
+
+const resellerCreateGroupSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, "Group name must be at least 2 characters")
+    .max(120, "Group name is too long"),
+  description: z.string().trim().max(500).optional().default(""),
+  adminEmail: emailSchema,
+});
+
+const updateGroupSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, "Group name must be at least 2 characters")
+    .max(120)
+    .optional(),
+  description: z.string().trim().max(500).optional(),
+});
+
+const adminUpdateUserSchema = z.object({
+  name: z.string().trim().max(200).optional(),
+  phone: z.string().trim().max(40).optional(),
+  country: z.string().trim().max(80).optional(),
+  company: z.string().trim().max(200).optional(),
+  role: z.enum(["reseller", "group_admin", "subscriber"]).optional(),
+  subscriptionExpiresAt: z.union([z.string().datetime(), z.null()]).optional(),
+});
+
+/** Extend by N periods of FREE_TRIAL_DAYS (default 90 days each). */
+const extendSubscriptionSchema = z.object({
+  periods: z.number().int().min(1).max(12).optional().default(1),
+});
+
+const systemSettingsUpdateSchema = z.object({
+  tokenExpiryHours: z.number().min(0.25).max(168).optional(),
+  checkInIntervalHours: z.number().min(0.25).max(168).optional(),
+  keyRotationRemindDays: z.number().int().min(1).max(730).optional(),
+});
+
+const acceptInviteSchema = z.object({
+  token: z.string().min(20),
+  password: adminPasswordSchema,
+  name: z.string().trim().max(200).optional().default(""),
+  acceptTerms: z
+    .boolean()
+    .refine((value) => value === true, {
+      message: "You must accept the Terms & Conditions",
+    }),
+});
+
+const createGroupOnboardingSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, "Group name must be at least 2 characters")
+    .max(120, "Group name is too long"),
+  description: z.string().trim().max(500).optional().default(""),
+});
+
+const chooseSubscriberOnboardingSchema = z.object({
+  confirm: z.literal(true).optional().default(true),
+});
+
+const profileUpdateSchema = z.object({
+  name: z.string().trim().max(200).optional(),
+  phone: z.string().trim().max(40).optional(),
+  country: z.string().trim().max(80).optional(),
+  company: z.string().trim().max(200).optional(),
+});
+
+/** Set password (Google-only) or change password (requires currentPassword). */
+const profilePasswordSchema = z.object({
+  password: adminPasswordSchema,
+  currentPassword: z.string().min(1).optional(),
+});
+
 module.exports = {
   signupSchema,
+  signupSendOtpSchema,
   loginSchema,
   googleLoginSchema,
   passwordResetRequestSchema,
@@ -252,4 +366,17 @@ module.exports = {
   secureSendSchema,
   smartSendSchema,
   subscriptionCheckSchema,
+  adminPasswordSchema,
+  adminLoginSchema,
+  adminInviteSchema,
+  adminUpdateUserSchema,
+  extendSubscriptionSchema,
+  systemSettingsUpdateSchema,
+  acceptInviteSchema,
+  profileUpdateSchema,
+  profilePasswordSchema,
+  createGroupOnboardingSchema,
+  chooseSubscriberOnboardingSchema,
+  resellerCreateGroupSchema,
+  updateGroupSchema,
 };
