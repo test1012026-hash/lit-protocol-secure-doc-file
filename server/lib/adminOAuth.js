@@ -43,9 +43,6 @@ function isAllowedReturnOrigin(origin) {
 
 function providerConfig(provider) {
   if (provider === "microsoft") {
-    console.log("process.env.ADMIN_OAUTH_MICROSOFT_TENANT",process.env.ADMIN_OAUTH_MICROSOFT_TENANT);
-    console.log("process.env.ADMIN_OAUTH_MICROSOFT_CLIENT_ID",process.env.ADMIN_OAUTH_MICROSOFT_CLIENT_ID);
-    console.log("process.env.ADMIN_OAUTH_MICROSOFT_CLIENT_SECRET",process.env.ADMIN_OAUTH_MICROSOFT_CLIENT_SECRET);
     const clientId = process.env.ADMIN_OAUTH_MICROSOFT_CLIENT_ID;
     const clientSecret = process.env.ADMIN_OAUTH_MICROSOFT_CLIENT_SECRET;
     const tenant = process.env.ADMIN_OAUTH_MICROSOFT_TENANT || "common";
@@ -62,7 +59,6 @@ function providerConfig(provider) {
   }
 
   if (provider === "google") {
-    console.log("process.env.ADMIN_OAUTH_GOOGLE_CLIENT_ID",process.env.ADMIN_OAUTH_GOOGLE_CLIENT_ID);
     const clientId =
       process.env.ADMIN_OAUTH_GOOGLE_CLIENT_ID ||
       process.env.GOOGLE_GMAIL_CLIENT_ID ||
@@ -111,13 +107,27 @@ function configuredProviders() {
  * Strategy 1 (multi-domain, single key): each admin origin's /api/.../callback
  * so cookies stick to that domain (via Vite/nginx proxy).
  * Hub mode: single API callback URI.
+ * Yahoo always uses the HTTPS hub (Yahoo rejects http:// redirect URIs).
  */
-function callbackUri(provider, returnOrigin) {
+function usesHubCallback(provider) {
   const mode = String(process.env.ADMIN_OAUTH_CALLBACK_MODE || "per_origin")
     .trim()
     .toLowerCase();
-  if (mode === "hub") {
-    return `${apiPublicBase()}/api/admin/auth/oauth/${provider}/callback`;
+  return mode === "hub" || provider === "yahoo";
+}
+
+function callbackUri(provider, returnOrigin) {
+  if (usesHubCallback(provider)) {
+    const base = apiPublicBase();
+    if (provider === "yahoo" && !base.startsWith("https://")) {
+      const err = new Error(
+        "Yahoo SSO requires an HTTPS callback. Set ADMIN_OAUTH_CALLBACK_BASE=https://your-api.example.com",
+      );
+      err.status = 503;
+      err.code = "YAHOO_HTTPS_REQUIRED";
+      throw err;
+    }
+    return `${base}/api/admin/auth/oauth/${provider}/callback`;
   }
   const origin = String(returnOrigin || "").replace(/\/$/, "");
   if (!origin) {
@@ -159,6 +169,9 @@ function buildAuthorizeUrl(
     path: returnPath.startsWith("/") ? returnPath : "/",
     intent: intent === "signup" ? "signup" : "login",
     terms: Boolean(acceptTerms),
+    // Pin the exact redirect_uri used at authorize time (token exchange must match).
+    ru: redirectUri,
+    hub: usesHubCallback(provider),
     n: crypto.randomBytes(16).toString("hex"),
   });
 
@@ -175,6 +188,9 @@ function buildAuthorizeUrl(
   if (provider === "microsoft") {
     url.searchParams.set("response_mode", "query");
   }
+  if (provider === "yahoo") {
+    url.searchParams.set("nonce", crypto.randomBytes(16).toString("hex"));
+  }
 
   return { url: url.toString(), redirectUri, state };
 }
@@ -183,20 +199,22 @@ async function exchangeCode(provider, code, redirectUri) {
   const cfg = providerConfig(provider);
   if (!cfg) throw new Error(`${provider} SSO is not configured`);
 
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectUri,
-    client_id: cfg.clientId,
-    client_secret: cfg.clientSecret,
   });
 
-  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  // Yahoo expects credentials only via HTTP Basic, not also in the body.
   if (provider === "yahoo") {
     const basic = Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString(
       "base64",
     );
     headers.Authorization = `Basic ${basic}`;
+  } else {
+    body.set("client_id", cfg.clientId);
+    body.set("client_secret", cfg.clientSecret);
   }
 
   const res = await fetch(cfg.tokenUrl, {
@@ -261,7 +279,18 @@ function signSsoTicket(userUuid) {
 }
 
 function verifySsoTicket(token) {
-  const payload = jwt.verify(token, jwtSecret());
+  let payload;
+  try {
+    payload = jwt.verify(token, jwtSecret());
+  } catch (err) {
+    const out = new Error(
+      "Session verification failed. Local and Vercel JWT_SECRET must match (Yahoo hub callback).",
+    );
+    out.status = 401;
+    out.code = "OAUTH_TICKET_INVALID";
+    out.cause = err;
+    throw out;
+  }
   if (payload.typ !== "admin_sso" || !payload.uuid) {
     const err = new Error("Invalid SSO ticket");
     err.status = 401;
@@ -271,6 +300,55 @@ function verifySsoTicket(token) {
   return payload;
 }
 
+function hashSsoHandoff(raw) {
+  return crypto.createHash("sha256").update(String(raw)).digest("hex");
+}
+
+/**
+ * DB one-time handoff so Yahoo hub (Vercel) → local admin works even when
+ * JWT_SECRET differs between hosts. Cleared after use or after 5 minutes.
+ */
+async function issueSsoHandoff(user) {
+  const User = require("../models/User");
+  const raw = crypto.randomBytes(32).toString("hex");
+  user.ssoHandoffHash = hashSsoHandoff(raw);
+  user.ssoHandoffExpiresAt = new Date(Date.now() + 5 * 60 * 1000);
+  await user.save();
+  // Prefix so /oauth/complete can prefer DB handoff over JWT.
+  return `hof_${raw}`;
+}
+
+async function consumeSsoHandoff(rawTicket) {
+  const User = require("../models/User");
+  const raw = String(rawTicket || "");
+  if (!raw.startsWith("hof_")) return null;
+
+  const hash = hashSsoHandoff(raw.slice(4));
+  const user = await User.findOne({
+    ssoHandoffHash: hash,
+    deletedAt: null,
+  });
+  if (!user) {
+    const err = new Error("Session verification failed. Request a new Yahoo login.");
+    err.status = 401;
+    err.code = "OAUTH_TICKET_INVALID";
+    throw err;
+  }
+  if (!user.ssoHandoffExpiresAt || user.ssoHandoffExpiresAt < new Date()) {
+    user.ssoHandoffHash = null;
+    user.ssoHandoffExpiresAt = null;
+    await user.save();
+    const err = new Error("SSO session expired. Try Yahoo login again.");
+    err.status = 401;
+    err.code = "OAUTH_TICKET_EXPIRED";
+    throw err;
+  }
+  user.ssoHandoffHash = null;
+  user.ssoHandoffExpiresAt = null;
+  await user.save();
+  return user;
+}
+
 module.exports = {
   PROVIDERS,
   configuredProviders,
@@ -278,11 +356,14 @@ module.exports = {
   isAllowedReturnOrigin,
   allowedReturnOrigins,
   callbackUri,
+  usesHubCallback,
   buildAuthorizeUrl,
   verifyState,
   exchangeCode,
   fetchProfile,
   signSsoTicket,
   verifySsoTicket,
+  issueSsoHandoff,
+  consumeSsoHandoff,
   apiPublicBase,
 };

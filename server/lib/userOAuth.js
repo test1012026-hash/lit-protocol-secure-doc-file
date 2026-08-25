@@ -89,6 +89,7 @@ function buildAuthorizeUrl(
     path: path.startsWith("/") ? path : `/${path}`,
     intent: intent === "signup" ? "signup" : "login",
     terms: Boolean(acceptTerms),
+    ru: redirectUri,
     n: crypto.randomBytes(16).toString("hex"),
   });
 
@@ -104,6 +105,9 @@ function buildAuthorizeUrl(
   }
   if (provider === "microsoft") {
     url.searchParams.set("response_mode", "query");
+  }
+  if (provider === "yahoo") {
+    url.searchParams.set("nonce", crypto.randomBytes(16).toString("hex"));
   }
 
   return { url: url.toString(), redirectUri, state };

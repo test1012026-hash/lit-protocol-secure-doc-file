@@ -1124,7 +1124,7 @@ router.get("/oauth/:provider/callback", async (req, res) => {
     const intent = state.intent === "signup" ? "signup" : "login";
     const acceptTerms = Boolean(state.terms);
 
-    const redirectUri = userOAuth.callbackUri(provider);
+    const redirectUri = state.ru || userOAuth.callbackUri(provider);
     const tokens = await userOAuth.exchangeCode(provider, code, redirectUri);
     if (!tokens.access_token) {
       return res.redirect(

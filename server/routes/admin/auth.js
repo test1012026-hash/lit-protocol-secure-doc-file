@@ -29,8 +29,10 @@ const {
   exchangeCode,
   fetchProfile,
   callbackUri,
-  signSsoTicket,
+  usesHubCallback,
   verifySsoTicket,
+  issueSsoHandoff,
+  consumeSsoHandoff,
 } = require("../../lib/adminOAuth");
 const {
   ensureUserSubscription,
@@ -298,7 +300,9 @@ router.get("/oauth/:provider/callback", async (req, res) => {
     intent = state.intent === "signup" ? "signup" : "login";
     const acceptTerms = Boolean(state.terms);
 
-    const redirectUri = callbackUri(provider, returnOrigin);
+    // Must match the redirect_uri from the authorize request exactly.
+    const redirectUri =
+      state.ru || callbackUri(provider, returnOrigin);
     const tokens = await exchangeCode(provider, code, redirectUri);
     if (!tokens.access_token) {
       return res.redirect(
@@ -325,12 +329,8 @@ router.get("/oauth/:provider/callback", async (req, res) => {
       provider,
     });
 
-    const mode = String(process.env.ADMIN_OAUTH_CALLBACK_MODE || "per_origin")
-      .trim()
-      .toLowerCase();
-
-    if (mode === "hub") {
-      const ticket = signSsoTicket(user.uuid);
+    if (state.hub || usesHubCallback(provider)) {
+      const ticket = await issueSsoHandoff(user);
       const url = new URL(
         intent === "signup" ? "/signup" : "/login",
         `${returnOrigin}/`,
@@ -446,8 +446,14 @@ router.post("/oauth/complete", async (req, res) => {
     if (!ticket) {
       return res.status(400).json({ error: "Missing SSO ticket" });
     }
-    const payload = verifySsoTicket(ticket);
-    const user = await User.findOne({ uuid: payload.uuid, deletedAt: null });
+
+    // Prefer DB handoff (Yahoo hub → local). Falls back to legacy JWT ticket.
+    let user = await consumeSsoHandoff(ticket);
+    if (!user) {
+      const payload = verifySsoTicket(ticket);
+      user = await User.findOne({ uuid: payload.uuid, deletedAt: null });
+    }
+
     if (!user?.claimed) {
       return res.status(404).json({
         error: "Account not found",

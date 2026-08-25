@@ -36,6 +36,12 @@ const userSchema = new mongoose.Schema({
   /** Password reset token (SHA-256). Cleared after use or expiry. */
   passwordResetTokenHash: { type: String, default: null },
   passwordResetExpiresAt: { type: Date, default: null },
+  /**
+   * One-time SSO handoff (Yahoo HTTPS hub → local admin).
+   * Survives different JWT_SECRET between Vercel and localhost.
+   */
+  ssoHandoffHash: { type: String, default: null, index: true },
+  ssoHandoffExpiresAt: { type: Date, default: null },
   googleId: { type: String, default: null },
   gmailRefreshToken: { type: String, default: null },
   gmailScopes: { type: String, default: "" },
