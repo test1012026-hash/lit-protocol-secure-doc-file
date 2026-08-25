@@ -329,7 +329,7 @@ router.get("/oauth/:provider/callback", async (req, res) => {
       provider,
     });
 
-    if (state.hub || usesHubCallback(provider)) {
+    if (state.hub || usesHubCallback(provider, returnOrigin)) {
       const ticket = await issueSsoHandoff(user);
       const url = new URL(
         intent === "signup" ? "/signup" : "/login",

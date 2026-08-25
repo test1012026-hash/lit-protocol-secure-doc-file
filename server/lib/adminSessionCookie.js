@@ -6,11 +6,31 @@ function isSecureRequest(req) {
   return Boolean(req.secure || req.headers["x-forwarded-proto"] === "https");
 }
 
+function isCrossSiteRequest(req) {
+  const origin = String(req.headers.origin || "").replace(/\/$/, "");
+  if (!origin) return false;
+  try {
+    const from = new URL(origin);
+    const proto = String(
+      req.headers["x-forwarded-proto"] || req.protocol || "https",
+    )
+      .split(",")[0]
+      .trim();
+    const host = req.get("host");
+    if (!host) return false;
+    const self = new URL(`${proto}://${host}`);
+    return from.hostname !== self.hostname;
+  } catch {
+    return false;
+  }
+}
+
 function adminCookieOptions(req, { maxAgeMs } = {}) {
+  const crossSite = isCrossSiteRequest(req);
   const opts = {
     httpOnly: true,
-    secure: isSecureRequest(req),
-    sameSite: "lax",
+    secure: isSecureRequest(req) || crossSite,
+    sameSite: crossSite ? "none" : "lax",
     path: "/",
   };
   if (maxAgeMs != null) opts.maxAge = maxAgeMs;

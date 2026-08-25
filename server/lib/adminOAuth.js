@@ -109,15 +109,19 @@ function configuredProviders() {
  * Hub mode: single API callback URI.
  * Yahoo always uses the HTTPS hub (Yahoo rejects http:// redirect URIs).
  */
-function usesHubCallback(provider) {
+function usesHubCallback(provider, returnOrigin) {
   const mode = String(process.env.ADMIN_OAUTH_CALLBACK_MODE || "per_origin")
     .trim()
     .toLowerCase();
-  return mode === "hub" || provider === "yahoo";
+  if (mode === "hub" || provider === "yahoo") return true;
+  const origin = String(returnOrigin || "").replace(/\/$/, "");
+  const api = apiPublicBase();
+  // Different hosts cannot share the admin_session cookie; use ticket handoff.
+  return Boolean(origin && api && origin !== api);
 }
 
 function callbackUri(provider, returnOrigin) {
-  if (usesHubCallback(provider)) {
+  if (usesHubCallback(provider, returnOrigin)) {
     const base = apiPublicBase();
     if (provider === "yahoo" && !base.startsWith("https://")) {
       const err = new Error(
@@ -171,7 +175,7 @@ function buildAuthorizeUrl(
     terms: Boolean(acceptTerms),
     // Pin the exact redirect_uri used at authorize time (token exchange must match).
     ru: redirectUri,
-    hub: usesHubCallback(provider),
+    hub: usesHubCallback(provider, returnOrigin),
     n: crypto.randomBytes(16).toString("hex"),
   });
 
