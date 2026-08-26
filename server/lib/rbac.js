@@ -119,6 +119,7 @@ function publicUser(user, { getPlainEmail }) {
     subscriptionActive,
     hasPassword: Boolean(user.passwordHash),
     hasPublicKey: Boolean(user.iron && user.thor),
+    microsoftLinked: Boolean(user.microsoftId),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };

@@ -43,6 +43,19 @@ const userSchema = new mongoose.Schema({
   ssoHandoffHash: { type: String, default: null, index: true },
   ssoHandoffExpiresAt: { type: Date, default: null },
   googleId: { type: String, default: null },
+  /**
+   * Microsoft Graph /me.id (oid). Immutable across Hotmail/Outlook/Live aliases.
+   * Prefer this over email when linking Microsoft SSO / RSA keys.
+   */
+  microsoftId: {
+    type: String,
+    default: null,
+    unique: true,
+    sparse: true,
+    index: true,
+  },
+  /** HMAC email hashes for known Microsoft aliases (mail, UPN, otherMails). */
+  microsoftAliasHashes: { type: [String], default: [], index: true },
   gmailRefreshToken: { type: String, default: null },
   gmailScopes: { type: String, default: "" },
   gmailConnectState: { type: String, default: null },

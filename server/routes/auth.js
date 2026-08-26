@@ -13,6 +13,8 @@ const {
   applyEncryptedEmail,
   getPlainEmail,
   findUserByEmail,
+  findUserByMicrosoftId,
+  linkMicrosoftIdentity,
 } = require("../lib/emailCrypto");
 const {
   // getGmailAuthUrl,
@@ -935,7 +937,25 @@ async function upsertUserFromOAuth(
   { intent = "login", acceptTerms = false, provider = "google" } = {},
 ) {
   const email = normalizeEmail(profile.email);
-  let user = await findUserByEmail(User, email);
+  const microsoftId =
+    provider === "microsoft" && profile.subject
+      ? String(profile.subject)
+      : null;
+
+  // Prefer stable provider ids so Hotmail/Outlook/Live aliases map to one RSA user.
+  let user = microsoftId
+    ? await findUserByMicrosoftId(User, microsoftId)
+    : null;
+  if (!user && provider === "google" && profile.subject) {
+    user = await User.findOne({
+      googleId: String(profile.subject),
+      deletedAt: null,
+    });
+  }
+  if (!user) {
+    user = await findUserByEmail(User, email);
+  }
+
   const isNewClaim = !user || !user.claimed;
 
   if (user?.deletedAt) {
@@ -966,24 +986,25 @@ async function upsertUserFromOAuth(
   }
 
   if (intent === "signup" && user?.claimed) {
-    const err = new Error(
-      "An account with this email already exists. Log in instead.",
-    );
-    err.status = 409;
-    err.code = "ACCOUNT_EXISTS";
-    throw err;
+    const sameMicrosoft =
+      Boolean(microsoftId) &&
+      String(user.microsoftId || "") === String(microsoftId);
+    const sameGoogle =
+      provider === "google" &&
+      profile.subject &&
+      String(user.googleId || "") === String(profile.subject);
+    if (!sameMicrosoft && !sameGoogle) {
+      const err = new Error(
+        "An account with this email already exists. Log in instead.",
+      );
+      err.status = 409;
+      err.code = "ACCOUNT_EXISTS";
+      throw err;
+    }
   }
-
-  const oauthId =
-    provider === "google" && profile.subject
-      ? String(profile.subject)
-      : profile.subject
-        ? `${provider}:${profile.subject}`
-        : null;
 
   if (!user) {
     user = new User({
-      googleId: oauthId,
       claimed: true,
       termsAndConditions: Boolean(acceptTerms),
       name: profile.name ? String(profile.name).slice(0, 200) : "",
@@ -991,21 +1012,47 @@ async function upsertUserFromOAuth(
     });
     applyEncryptedEmail(user, email);
   } else {
-    applyEncryptedEmail(user, email);
+    // Existing Microsoft account (any alias): keep RSA keys; don't overwrite
+    // primary email if already set — aliases are tracked separately.
+    if (!user.claimed) {
+      applyEncryptedEmail(user, email);
+    } else if (!getPlainEmail(user) && email) {
+      applyEncryptedEmail(user, email);
+    }
     user.claimed = true;
     if (acceptTerms) user.termsAndConditions = true;
     if (intent === "signup" && !user.onboardingComplete) {
       user.onboardingComplete = false;
-    }
-    if (oauthId && (!user.googleId || provider === "google")) {
-      user.googleId = oauthId;
     }
     if (profile.name && !user.name) {
       user.name = String(profile.name).slice(0, 200);
     }
   }
 
+  if (provider === "google" && profile.subject) {
+    user.googleId = String(profile.subject);
+  }
+  if (microsoftId) {
+    linkMicrosoftIdentity(user, {
+      microsoftId,
+      emails: profile.emails || [],
+      primaryEmail: email,
+    });
+  }
+
   await finalizeClaimedUser(user);
+
+  if (microsoftId) {
+    console.log("[upsertUserFromOAuth] saved User.microsoftId", {
+      uuid: user.uuid,
+      microsoftId: user.microsoftId,
+      primaryEmail: getPlainEmail(user),
+      aliasHashes: Array.isArray(user.microsoftAliasHashes)
+        ? user.microsoftAliasHashes.length
+        : 0,
+    });
+  }
+
   return user;
 }
 
@@ -1025,6 +1072,12 @@ router.get("/oauth/providers", (req, res) => {
 router.get("/oauth/:provider/start", (req, res) => {
   try {
     const provider = String(req.params.provider || "").toLowerCase();
+    console.log("[outlook oauth] START", {
+      provider,
+      returnOrigin: req.query.returnOrigin,
+      intent: req.query.intent,
+      host: req.get("host"),
+    });
     if (!userOAuth.PROVIDERS.includes(provider)) {
       return res.status(404).json({ error: "Unknown SSO provider" });
     }
@@ -1050,12 +1103,13 @@ router.get("/oauth/:provider/start", (req, res) => {
       );
     }
 
-    const { url } = userOAuth.buildAuthorizeUrl(provider, {
+    const { url, redirectUri } = userOAuth.buildAuthorizeUrl(provider, {
       returnOrigin,
       returnPath,
       intent,
       acceptTerms,
     });
+    console.log("[outlook oauth] START redirect_uri", redirectUri);
     return res.redirect(url);
   } catch (err) {
     const status = err.status || 500;
@@ -1082,6 +1136,12 @@ router.get("/oauth/:provider/callback", async (req, res) => {
   let returnPath = "/oauth-dialog-callback.html";
   try {
     const provider = String(req.params.provider || "").toLowerCase();
+    console.log("[outlook oauth] CALLBACK hit", {
+      provider,
+      hasCode: Boolean(req.query.code),
+      hasError: Boolean(req.query.error),
+      host: req.get("host"),
+    });
     if (!userOAuth.PROVIDERS.includes(provider)) {
       return res.status(404).send("Unknown SSO provider");
     }
@@ -1134,6 +1194,17 @@ router.get("/oauth/:provider/callback", async (req, res) => {
           "No access token from provider",
         ),
       );
+    }
+
+    // TEMP: copy into Postman Bearer token for Graph /me. Remove after debugging.
+    if (provider === "microsoft") {
+      console.log("[Outlook Microsoft SSO] access_token:\n" + tokens.access_token);
+      console.log("[Outlook Microsoft SSO] token meta", {
+        token_type: tokens.token_type,
+        expires_in: tokens.expires_in,
+        scope: tokens.scope,
+        redirectUri,
+      });
     }
 
     const profile = await userOAuth.fetchProfile(

@@ -18,6 +18,7 @@ const {
   applyEncryptedEmail,
   getPlainEmail,
   findUserByEmail,
+  resolveEncryptRecipient,
 } = require("../lib/emailCrypto");
 const {
   ensureUserSubscription,
@@ -41,25 +42,8 @@ const {
 const router = express.Router();
 
 async function ensureRecipientByEmail(rawEmail) {
-  const email = normalizeEmail(rawEmail);
-  let recipient = await findUserByEmail(User, rawEmail);
-  if (recipient) return recipient;
-
-  try {
-    const user = new User({
-      claimed: false,
-      uuid: crypto.randomUUID(),
-    });
-    applyEncryptedEmail(user, email);
-    await user.save();
-    return user;
-  } catch (err) {
-    if (err.code === 11000) {
-      recipient = await findUserByEmail(User, email);
-      if (recipient) return recipient;
-    }
-    throw err;
-  }
+  const { recipient } = await resolveEncryptRecipient(User, rawEmail);
+  return recipient;
 }
 
 function hasCompleteRecipientKeys(user) {

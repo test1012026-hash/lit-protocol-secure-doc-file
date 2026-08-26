@@ -53,7 +53,9 @@ function providerConfig(provider) {
       clientSecret,
       authUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,
       tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
-      userInfoUrl: "https://graph.microsoft.com/v1.0/me",
+      // id is the stable oid; select aliases so we can encrypt to any of them.
+      userInfoUrl:
+        "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName,otherMails",
       scopes: ["openid", "email", "profile", "User.Read"],
     };
   }
@@ -113,10 +115,18 @@ function usesHubCallback(provider, returnOrigin) {
   const mode = String(process.env.ADMIN_OAUTH_CALLBACK_MODE || "per_origin")
     .trim()
     .toLowerCase();
-  if (mode === "hub" || provider === "yahoo") return true;
+  if (provider === "yahoo") return true;
+  if (mode === "hub") return true;
+
   const origin = String(returnOrigin || "").replace(/\/$/, "");
+  // Local admin: keep callback on the Vite origin so Microsoft returns to
+  // localhost (proxied to :4000). Do NOT send local SSO to ADMIN_OAUTH_CALLBACK_BASE (Vercel).
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+    return false;
+  }
+
   const api = apiPublicBase();
-  // Different hosts cannot share the admin_session cookie; use ticket handoff.
+  // Live admin on a different host than the API → hub callback + ticket handoff.
   return Boolean(origin && api && origin !== api);
 }
 
@@ -247,6 +257,16 @@ async function fetchProfile(provider, accessToken) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const data = await res.json().catch(() => ({}));
+
+  if (provider === "microsoft") {
+    console.log("[Microsoft Graph /me]", {
+      status: res.status,
+      ok: res.ok,
+      url: cfg.userInfoUrl,
+      body: data,
+    });
+  }
+
   if (!res.ok) {
     const err = new Error(
       data.error?.message || data.error || "Failed to load SSO profile",
@@ -257,15 +277,36 @@ async function fetchProfile(provider, accessToken) {
   }
 
   if (provider === "microsoft") {
-    const email =
-      data.mail ||
-      data.userPrincipalName ||
-      (Array.isArray(data.otherMails) ? data.otherMails[0] : null);
-    return {
-      email: email ? String(email).toLowerCase() : null,
-      name: data.displayName || "",
-      subject: data.id || null,
+    const emails = [];
+    const pushEmail = (v) => {
+      const e = v ? String(v).trim().toLowerCase() : "";
+      // Skip Azure AD guest UPNs like user_hotmail.com#EXT#@tenant.onmicrosoft.com
+      if (!e || !e.includes("@") || e.includes("#ext#")) return;
+      if (!emails.includes(e)) emails.push(e);
     };
+    pushEmail(data.mail);
+    if (Array.isArray(data.otherMails)) {
+      for (const m of data.otherMails) pushEmail(m);
+    }
+    // UPN only if it looks like a normal mailbox address (not guest #EXT#)
+    pushEmail(data.userPrincipalName);
+
+    const microsoftId = data.id ? String(data.id).trim() : null;
+    const profile = {
+      email: emails[0] || null,
+      emails,
+      name: data.displayName || "",
+      // Graph /me.id → User.microsoftId (stable across Hotmail/Outlook aliases)
+      subject: microsoftId,
+      microsoftId,
+    };
+    console.log("[Microsoft Graph /me] mapped profile → store microsoftId", {
+      microsoftId: profile.microsoftId,
+      email: profile.email,
+      emails: profile.emails,
+      name: profile.name,
+    });
+    return profile;
   }
 
   return {

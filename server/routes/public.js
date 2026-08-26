@@ -10,6 +10,7 @@ const {
   applyEncryptedEmail,
   getPlainEmail,
   findUserByEmail,
+  resolveEncryptRecipient,
 } = require("../lib/emailCrypto");
 const {
   ensureUserSubscription,
@@ -33,30 +34,16 @@ function hasCompleteRecipientKeys(user) {
 }
 
 async function ensureRecipientByEmail(rawEmail) {
-  const email = normalizeEmail(rawEmail);
-  let recipient = await findUserByEmail(User, rawEmail);
-  if (recipient) return { recipient, created: false };
-
-  try {
-    const user = new User({
-      claimed: false,
-      uuid: crypto.randomUUID(),
-    });
-    applyEncryptedEmail(user, email);
-    await user.save();
-    return { recipient: user, created: true };
-  } catch (err) {
-    if (err.code === 11000) {
-      recipient = await findUserByEmail(User, email);
-      if (recipient) return { recipient, created: false };
-    }
-    throw err;
-  }
+  return resolveEncryptRecipient(User, rawEmail);
 }
 
 /** Create RSA keys on the server if the user has none. */
 async function ensureKeysOnUser(user) {
   if (hasCompleteRecipientKeys(user)) {
+    console.log("[ensureKeysOnUser] reuse existing RSA keys", {
+      uuid: user.uuid,
+      microsoftId: user.microsoftId || null,
+    });
     return { iron: user.iron, created: false };
   }
   const bundle = createKeyBundleForUuid(user.uuid);
@@ -66,6 +53,10 @@ async function ensureKeysOnUser(user) {
   user.venom = bundle.venom;
   await user.save();
   await User.updateOne({ _id: user._id }, { $unset: { keyActionId: 1 } });
+  console.log("[ensureKeysOnUser] created new RSA keys", {
+    uuid: user.uuid,
+    microsoftId: user.microsoftId || null,
+  });
   return { iron: user.iron, created: true };
 }
 
@@ -187,8 +178,26 @@ router.post("/encrypt", async (req, res) => {
       });
     }
 
-    const { recipient, created: recipientCreated } =
-      await ensureRecipientByEmail(to);
+    const {
+      recipient,
+      created: recipientCreated,
+      reusedMicrosoftKeys,
+    } = await ensureRecipientByEmail(to);
+
+    console.log("[public/encrypt] recipient resolve", {
+      requestedTo: to,
+      uuid: recipient.uuid,
+      primaryEmail: getPlainEmail(recipient) || null,
+      microsoftId: recipient.microsoftId || null,
+      reusedMicrosoftKeys: Boolean(reusedMicrosoftKeys),
+      microsoftAliasHashesCount: Array.isArray(recipient.microsoftAliasHashes)
+        ? recipient.microsoftAliasHashes.length
+        : 0,
+      claimed: Boolean(recipient.claimed),
+      recipientCreated,
+      hasExistingKeys: Boolean(recipient.iron && recipient.thor),
+    });
+
     assertCanReceiveEncryptedMail(recipient);
     const { iron, created: keysCreated } = await ensureKeysOnUser(recipient);
 

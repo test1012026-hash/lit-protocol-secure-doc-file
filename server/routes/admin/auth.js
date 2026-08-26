@@ -7,6 +7,8 @@ const {
   findUserByEmail,
   getPlainEmail,
   applyEncryptedEmail,
+  findUserByMicrosoftId,
+  linkMicrosoftIdentity,
 } = require("../../lib/emailCrypto");
 const {
   issueAuthTokens,
@@ -111,7 +113,25 @@ async function resolvePanelUserByEmail(email) {
 /** Login or create (signup) panel user from SSO profile. */
 async function resolveOrCreatePanelUserFromSso(profile, { intent, acceptTerms, provider }) {
   const email = normalizeEmail(profile.email);
-  let user = await findUserByEmail(User, email);
+  const microsoftId =
+    provider === "microsoft" && profile.subject
+      ? String(profile.subject)
+      : null;
+
+  // Microsoft: resolve by stable Graph oid first (aliases share the same id).
+  let user = microsoftId
+    ? await findUserByMicrosoftId(User, microsoftId)
+    : null;
+  if (!user && provider === "google" && profile.subject) {
+    user = await User.findOne({
+      googleId: String(profile.subject),
+      deletedAt: null,
+    });
+  }
+  if (!user) {
+    user = await findUserByEmail(User, email);
+  }
+
   const isNewClaim = !user || !user.claimed;
 
   if (user?.deletedAt) {
@@ -141,11 +161,19 @@ async function resolveOrCreatePanelUserFromSso(profile, { intent, acceptTerms, p
     throw err;
   }
 
+  // Same Microsoft account signing up again under a different alias → allow (login).
   if (intent === "signup" && user?.claimed) {
-    const err = new Error("An account with this email already exists. Log in instead.");
-    err.status = 409;
-    err.code = "ACCOUNT_EXISTS";
-    throw err;
+    const sameMicrosoft =
+      Boolean(microsoftId) &&
+      String(user.microsoftId || "") === String(microsoftId);
+    if (!sameMicrosoft) {
+      const err = new Error(
+        "An account with this email already exists. Log in instead.",
+      );
+      err.status = 409;
+      err.code = "ACCOUNT_EXISTS";
+      throw err;
+    }
   }
 
   if (!user) {
@@ -174,9 +202,27 @@ async function resolveOrCreatePanelUserFromSso(profile, { intent, acceptTerms, p
   if (provider === "google" && profile.subject) {
     user.googleId = profile.subject;
   }
+  if (microsoftId) {
+    linkMicrosoftIdentity(user, {
+      microsoftId,
+      emails: profile.emails || [],
+      primaryEmail: email,
+    });
+  }
 
   await user.save();
   await ensureUserSubscription(user);
+
+  if (microsoftId) {
+    console.log("[admin SSO] saved User.microsoftId", {
+      uuid: user.uuid,
+      microsoftId: user.microsoftId,
+      primaryEmail: getPlainEmail(user),
+      aliasHashes: Array.isArray(user.microsoftAliasHashes)
+        ? user.microsoftAliasHashes.length
+        : 0,
+    });
+  }
 
   if (!canAccessPanel(user)) {
     const err = new Error("Panel access required");
@@ -210,6 +256,12 @@ router.get("/oauth/providers", (req, res) => {
 router.get("/oauth/:provider/start", (req, res) => {
   try {
     const provider = String(req.params.provider || "").toLowerCase();
+    console.log("[admin oauth] START", {
+      provider,
+      returnOrigin: req.query.returnOrigin,
+      intent: req.query.intent,
+      host: req.get("host"),
+    });
     if (!PROVIDERS.includes(provider)) {
       return res.status(404).json({ error: "Unknown SSO provider" });
     }
@@ -229,12 +281,13 @@ router.get("/oauth/:provider/start", (req, res) => {
         }),
       );
     }
-    const { url } = buildAuthorizeUrl(provider, {
+    const { url, redirectUri } = buildAuthorizeUrl(provider, {
       returnOrigin,
       returnPath,
       intent,
       acceptTerms,
     });
+    console.log("[admin oauth] START redirect_uri", redirectUri);
     return res.redirect(url);
   } catch (err) {
     const status = err.status || 500;
@@ -258,6 +311,12 @@ router.get("/oauth/:provider/callback", async (req, res) => {
   let intent = "login";
   try {
     const provider = String(req.params.provider || "").toLowerCase();
+    console.log("[admin oauth] CALLBACK hit", {
+      provider,
+      hasCode: Boolean(req.query.code),
+      hasError: Boolean(req.query.error),
+      host: req.get("host"),
+    });
     if (!PROVIDERS.includes(provider)) {
       return res.status(404).send("Unknown SSO provider");
     }
@@ -310,6 +369,18 @@ router.get("/oauth/:provider/callback", async (req, res) => {
           intent,
         }),
       );
+    }
+
+    // TEMP: copy this into Postman Bearer token for Graph /me testing.
+    // Remove after debugging — do not leave tokens in production logs.
+    if (provider === "microsoft") {
+      console.log("[Microsoft SSO] access_token:\n" + tokens.access_token);
+      console.log("[Microsoft SSO] token meta", {
+        token_type: tokens.token_type,
+        expires_in: tokens.expires_in,
+        scope: tokens.scope,
+        redirectUri,
+      });
     }
 
     const profile = await fetchProfile(provider, tokens.access_token);

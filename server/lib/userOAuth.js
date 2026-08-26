@@ -49,9 +49,17 @@ function isAllowedReturnOrigin(origin) {
   );
 }
 
-/** Always hub callback on API host — register these URIs at each IdP. */
+/** Hub callback on API host — Outlook add-in has no /api proxy. */
 function callbackUri(provider) {
-  return `${apiPublicBase()}/api/auth/oauth/${provider}/callback`;
+  // Yahoo rejects http:// redirect URIs — keep HTTPS hub for Yahoo only.
+  if (provider === "yahoo") {
+    return `${apiPublicBase()}/api/auth/oauth/${provider}/callback`;
+  }
+  // Prefer APP_URL so local Outlook SSO hits localhost:4000 (not Vercel hub).
+  const base = String(
+    process.env.APP_URL || apiPublicBase() || "http://localhost:4000",
+  ).replace(/\/$/, "");
+  return `${base}/api/auth/oauth/${provider}/callback`;
 }
 
 function signState(payload) {
