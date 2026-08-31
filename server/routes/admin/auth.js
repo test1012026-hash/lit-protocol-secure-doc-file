@@ -16,6 +16,9 @@ const {
   DEFAULT_TOKEN_HOURS,
 } = require("../../lib/tokens");
 const {
+  calculateGroupExpiresAt,
+} = require("../../lib/subscription");
+const {
   canAccessPanel,
   publicUserWithHierarchy,
 } = require("../../lib/rbac");
@@ -714,12 +717,14 @@ router.post(
         });
       }
 
+      const expiresAt = await calculateGroupExpiresAt(new Date());
       const group = new Group({
         name: req.body.name,
         description: req.body.description || "",
         adminUuid: user.uuid,
         createdByUuid: user.uuid,
         sellerUuid: null,
+        expiresAt,
       });
       await group.save();
 
@@ -728,6 +733,7 @@ router.post(
       user.groupUuid = group.uuid;
       user.parentUuid = user.parentUuid || null;
       user.sellerUuid = user.sellerUuid || null;
+      user.subscriptionExpiresAt = group.expiresAt;
       user.onboardingComplete = true;
       await user.save();
 

@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const User = require("../../models/User");
+const Group = require("../../models/Group");
 const Invitation = require("../../models/Invitation");
 const { normalizeEmail } = require("../../lib/email");
 const {
@@ -13,11 +14,15 @@ const {
 const {
   FREE_TRIAL_DAYS,
   trialExpiresFrom,
+  calculateGroupExpiresAt,
+  ensureGroupExpiresAt,
+  syncGroupMembersExpiration,
 } = require("../../lib/subscription");
 const { issueAuthTokens } = require("../../lib/tokens");
 const { publicUser, isSuperAdmin, canAccessPanel } = require("../../lib/rbac");
 const { logActivity } = require("../../lib/activityLog");
 const { setAdminSessionCookie } = require("../../lib/adminSessionCookie");
+const { sendInviteEmail } = require("../../lib/mail");
 const { validateBody } = require("../../middleware/validate");
 const { adminInviteSchema, acceptInviteSchema } = require("../../validation/schemas");
 const { adminAuthMiddleware } = require("../../middleware/adminAuth");
@@ -25,7 +30,7 @@ const SystemSettings = require("../../models/SystemSettings");
 
 const router = express.Router();
 
-const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 router.post(
   "/",
@@ -60,9 +65,44 @@ router.post(
         }
       }
 
+      let groupUuid = null;
+      let groupName = role === "group_admin" ? String(req.body.groupName || "").trim() : "";
+      if (req.admin.role === "group_admin") {
+        const adminGroup = await Group.findOne({ adminUuid: req.admin.uuid }).lean();
+        if (adminGroup) {
+          groupUuid = adminGroup.uuid;
+          if (!groupName) groupName = adminGroup.name;
+        }
+      }
+
       const existing = await findUserByEmail(User, email);
-      if (existing?.claimed && !existing.deletedAt) {
-        return res.status(409).json({ error: "User already registered", code: "USER_EXISTS" });
+      if (existing && !existing.deletedAt && existing.claimed) {
+        const inGroup = Boolean(
+          existing.groupUuid ||
+          existing.groupAdminUuid ||
+          existing.role === "group_admin" ||
+          existing.role === "reseller" ||
+          existing.role === "super_admin"
+        );
+        if (inGroup) {
+          return res.status(409).json({
+            error: "This user already belongs to another group or organization.",
+            code: "ALREADY_IN_GROUP",
+          });
+        }
+        // Independent subscriber without a group can be invited into this group
+      }
+
+      const pendingInvite = await Invitation.findOne({
+        emailHash: hashEmail(email),
+        status: "pending",
+        expiresAt: { $gt: new Date() },
+      });
+      if (pendingInvite) {
+        return res.status(409).json({
+          error: "A pending invite already exists for this email",
+          code: "INVITE_PENDING",
+        });
       }
 
       const token = Invitation.createToken();
@@ -84,8 +124,8 @@ router.post(
             : req.admin.role === "group_admin"
               ? req.admin.uuid
               : null,
-        groupName:
-          role === "group_admin" ? String(req.body.groupName || "").trim() : "",
+        groupUuid,
+        groupName,
         groupDescription:
           role === "group_admin"
             ? String(req.body.groupDescription || "").trim()
@@ -111,6 +151,18 @@ router.post(
         "http://localhost:5174"
       ).replace(/\/$/, "");
 
+      const inviteUrl = `${appBase}/accept-invite?token=${token}`;
+
+      await sendInviteEmail({
+        to: email,
+        inviteUrl,
+        role,
+        groupName,
+        inviterEmail: getPlainEmail(req.admin),
+      }).catch((err) => {
+        console.error("Failed to send invite email:", err.message);
+      });
+
       return res.status(201).json({
         invitation: {
           id: invite._id,
@@ -121,7 +173,7 @@ router.post(
           trialDays: FREE_TRIAL_DAYS,
         },
         inviteToken: token,
-        inviteUrl: `${appBase}/accept-invite?token=${token}`,
+        inviteUrl,
       });
     } catch (err) {
       return res.status(500).json({ error: err.message });
@@ -203,13 +255,22 @@ router.get("/accept/:token", async (req, res) => {
     if (invite.expiresAt.getTime() < Date.now()) {
       invite.status = "expired";
       await invite.save();
-      return res.status(410).json({ error: "Invitation expired", code: "INVITE_EXPIRED" });
+      return res.status(410).json({
+        error: "Invitation expired. Invitation links are valid for 24 hours only.",
+        code: "INVITE_EXPIRED",
+      });
     }
+
+    const user = await findUserByEmail(User, invite.email);
+    const isExistingUser = Boolean(user && !user.deletedAt && user.claimed);
+
     return res.json({
       email: invite.email,
       role: invite.role,
+      groupName: invite.groupName || "",
       trialDays: FREE_TRIAL_DAYS,
       expiresAt: invite.expiresAt,
+      isExistingUser,
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -227,57 +288,127 @@ router.post("/accept", validateBody(acceptInviteSchema), async (req, res) => {
     if (invite.expiresAt.getTime() < Date.now()) {
       invite.status = "expired";
       await invite.save();
-      return res.status(410).json({ error: "Invitation expired", code: "INVITE_EXPIRED" });
+      return res.status(410).json({
+        error: "Invitation expired. Invitation links are valid for 24 hours only.",
+        code: "INVITE_EXPIRED",
+      });
     }
 
     let user = await findUserByEmail(User, invite.email);
-    if (user?.claimed && !user.deletedAt) {
-      return res.status(409).json({ error: "Account already exists", code: "USER_EXISTS" });
-    }
+    const isExisting = Boolean(user && !user.deletedAt && user.claimed);
 
-    const passwordHash = await bcrypt.hash(req.body.password, 12);
-    if (!user) {
-      user = new User({
-        uuid: crypto.randomUUID(),
-        claimed: true,
-      });
-      applyEncryptedEmail(user, invite.email);
-    }
+    if (isExisting) {
+      // Check if user is already in another group
+      if (user.groupUuid || user.groupAdminUuid || user.role === "group_admin" || user.role === "reseller") {
+        return res.status(409).json({
+          error: "Account already belongs to a group or organization.",
+          code: "ALREADY_IN_GROUP",
+        });
+      }
 
-    user.claimed = true;
-    user.deletedAt = null;
-    user.blocked = false;
-    user.passwordHash = passwordHash;
-    user.termsAndConditions = true;
-    user.name = req.body.name || user.name || "";
-    user.role = invite.role;
-    user.parentUuid = invite.parentUuid;
-    user.sellerUuid =
-      invite.role === "reseller" ? user.uuid : invite.sellerUuid;
-    user.groupAdminUuid =
-      invite.role === "group_admin" ? user.uuid : invite.groupAdminUuid;
-    // Same as signup: 90-day (3 month) period on subscriptionExpiresAt
-    user.subscriptionExpiresAt = trialExpiresFrom(new Date());
-    user.onboardingComplete = true;
-    await user.save();
+      if (req.body.password && String(req.body.password).trim()) {
+        user.passwordHash = await bcrypt.hash(req.body.password, 12);
+      }
+      if (req.body.name) {
+        user.name = req.body.name;
+      }
+      user.role = invite.role;
+      user.parentUuid = invite.parentUuid;
+      user.sellerUuid =
+        invite.role === "reseller" ? user.uuid : invite.sellerUuid;
+      user.groupAdminUuid =
+        invite.role === "group_admin" ? user.uuid : invite.groupAdminUuid;
+
+      if (invite.groupUuid) {
+        user.groupUuid = invite.groupUuid;
+      } else if (invite.groupAdminUuid) {
+        const adminGroup = await Group.findOne({ adminUuid: invite.groupAdminUuid }).lean();
+        if (adminGroup) user.groupUuid = adminGroup.uuid;
+      }
+
+      user.onboardingComplete = true;
+      user.termsAndConditions = true;
+      await user.save();
+    } else {
+      if (!req.body.password || req.body.password.length < 12) {
+        return res.status(400).json({
+          error: "Password must be at least 12 characters",
+          code: "INVALID_PASSWORD",
+        });
+      }
+
+      const passwordHash = await bcrypt.hash(req.body.password, 12);
+      if (!user) {
+        user = new User({
+          uuid: crypto.randomUUID(),
+          claimed: true,
+        });
+        applyEncryptedEmail(user, invite.email);
+      }
+
+      user.claimed = true;
+      user.deletedAt = null;
+      user.blocked = false;
+      user.passwordHash = passwordHash;
+      user.termsAndConditions = true;
+      user.name = req.body.name || user.name || "";
+      user.role = invite.role;
+      user.parentUuid = invite.parentUuid;
+      user.sellerUuid =
+        invite.role === "reseller" ? user.uuid : invite.sellerUuid;
+      user.groupAdminUuid =
+        invite.role === "group_admin" ? user.uuid : invite.groupAdminUuid;
+
+      if (invite.groupUuid) {
+        user.groupUuid = invite.groupUuid;
+      } else if (invite.groupAdminUuid) {
+        const adminGroup = await Group.findOne({ adminUuid: invite.groupAdminUuid }).lean();
+        if (adminGroup) user.groupUuid = adminGroup.uuid;
+      }
+
+      // Same as signup: 90-day (3 month) period on subscriptionExpiresAt
+      user.subscriptionExpiresAt = trialExpiresFrom(new Date());
+      user.onboardingComplete = true;
+      await user.save();
+    }
 
     let createdGroup = null;
     if (invite.role === "group_admin" && String(invite.groupName || "").trim()) {
-      const Group = require("../../models/Group");
       const existingGroup = await Group.findOne({ adminUuid: user.uuid });
       if (!existingGroup) {
+        const groupExpiresAt = await calculateGroupExpiresAt(new Date());
         createdGroup = await Group.create({
           name: String(invite.groupName).trim(),
           description: String(invite.groupDescription || "").trim(),
           adminUuid: user.uuid,
           sellerUuid: invite.sellerUuid || null,
           createdByUuid: invite.invitedByUuid || user.uuid,
+          expiresAt: groupExpiresAt,
         });
         user.groupUuid = createdGroup.uuid;
+        user.subscriptionExpiresAt = createdGroup.expiresAt;
         await user.save();
       } else {
+        if (!existingGroup.expiresAt) {
+          await ensureGroupExpiresAt(existingGroup, User);
+        }
         createdGroup = existingGroup;
         user.groupUuid = existingGroup.uuid;
+        user.subscriptionExpiresAt = existingGroup.expiresAt;
+        await user.save();
+      }
+    } else if (user.groupUuid || user.groupAdminUuid) {
+      const targetGroup = await Group.findOne({
+        $or: [
+          ...(user.groupUuid ? [{ uuid: user.groupUuid }] : []),
+          ...(user.groupAdminUuid ? [{ adminUuid: user.groupAdminUuid }] : []),
+        ],
+      });
+      if (targetGroup) {
+        if (!targetGroup.expiresAt) {
+          await ensureGroupExpiresAt(targetGroup, User);
+        }
+        user.subscriptionExpiresAt = targetGroup.expiresAt;
         await user.save();
       }
     }
@@ -310,6 +441,7 @@ router.post("/accept", validateBody(acceptInviteSchema), async (req, res) => {
       ok: true,
       expiresAt: issued.expiresAt,
       user: userJson,
+      isExistingUser: isExisting,
       group: createdGroup
         ? {
             uuid: createdGroup.uuid,

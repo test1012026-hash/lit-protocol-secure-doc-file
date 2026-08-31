@@ -1,5 +1,7 @@
 const express = require("express");
+const crypto = require("crypto");
 const User = require("../../models/User");
+const Group = require("../../models/Group");
 const { getPlainEmail } = require("../../lib/emailCrypto");
 const {
   canManageUser,
@@ -14,9 +16,24 @@ const {
   adminUpdateUserSchema,
   extendSubscriptionSchema,
 } = require("../../validation/schemas");
-const { extendSubscription, FREE_TRIAL_DAYS } = require("../../lib/subscription");
+const {
+  extendSubscription,
+  FREE_TRIAL_DAYS,
+  calculateGroupExpiresAt,
+  ensureGroupExpiresAt,
+  syncGroupMembersExpiration,
+} = require("../../lib/subscription");
 
 const router = express.Router();
+
+function generateRandomGroupName(len = 6) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let result = "";
+  for (let i = 0; i < len; i++) {
+    result += chars.charAt(crypto.randomInt(0, chars.length));
+  }
+  return result;
+}
 
 router.get("/", async (req, res) => {
   try {
@@ -102,9 +119,71 @@ router.patch("/:uuid", validateBody(adminUpdateUserSchema), async (req, res) => 
       if (req.body.role === "reseller") {
         target.sellerUuid = target.uuid;
         target.groupAdminUuid = null;
+        target.groupUuid = null;
       } else if (req.body.role === "group_admin") {
-        target.sellerUuid = target.sellerUuid || req.admin.sellerUuid || req.admin.uuid;
+        target.sellerUuid =
+          target.sellerUuid ||
+          (req.admin.role === "reseller" ? req.admin.uuid : req.admin.sellerUuid || req.admin.uuid);
         target.groupAdminUuid = target.uuid;
+        target.onboardingComplete = true;
+      } else if (req.body.role === "subscriber") {
+        if (target.groupAdminUuid === target.uuid) {
+          target.groupAdminUuid = null;
+        }
+        target.groupUuid = null;
+      }
+    }
+
+    if (target.role === "group_admin") {
+      let group = await Group.findOne({ adminUuid: target.uuid });
+      const rawGroupName = typeof req.body.groupName === "string" ? req.body.groupName.trim() : "";
+      const rawDescription = typeof req.body.groupDescription === "string" ? req.body.groupDescription.trim() : "";
+
+      if (!group) {
+        const finalGroupName = rawGroupName || generateRandomGroupName(6);
+        const expiresAt = await calculateGroupExpiresAt(new Date());
+        group = await Group.create({
+          name: finalGroupName,
+          description: rawDescription,
+          adminUuid: target.uuid,
+          sellerUuid:
+            target.sellerUuid ||
+            (req.admin.role === "reseller" ? req.admin.uuid : req.admin.sellerUuid || req.admin.uuid),
+          createdByUuid: req.admin.uuid,
+          expiresAt,
+        });
+        target.groupUuid = group.uuid;
+        target.subscriptionExpiresAt = group.expiresAt;
+
+        await logActivity({
+          actorUuid: req.admin.uuid,
+          actorRole: req.admin.role,
+          action: "admin.group_create",
+          targetType: "group",
+          targetId: group.uuid,
+          meta: { name: group.name, adminUuid: target.uuid, mode: "role_update" },
+          ip: req.ip,
+        }).catch(() => {});
+      } else {
+        if (!group.expiresAt) {
+          await ensureGroupExpiresAt(group, User);
+        }
+        let changed = false;
+        if (rawGroupName && rawGroupName !== group.name) {
+          group.name = rawGroupName;
+          changed = true;
+        }
+        if (req.body.groupDescription !== undefined && rawDescription !== group.description) {
+          group.description = rawDescription;
+          changed = true;
+        }
+        if (changed) {
+          await group.save();
+        }
+        if (!target.groupUuid) {
+          target.groupUuid = group.uuid;
+        }
+        target.subscriptionExpiresAt = group.expiresAt;
       }
     }
 
@@ -172,10 +251,48 @@ router.post("/:uuid/make-admin", async (req, res) => {
     if (targetRole === "reseller") {
       target.sellerUuid = target.uuid;
       target.groupAdminUuid = null;
+      target.groupUuid = null;
     } else {
       target.sellerUuid =
         req.admin.role === "reseller" ? req.admin.uuid : req.admin.sellerUuid || req.admin.uuid;
       target.groupAdminUuid = target.uuid;
+      target.onboardingComplete = true;
+
+      let group = await Group.findOne({ adminUuid: target.uuid });
+      if (!group) {
+        const rawGroupName = typeof req.body.groupName === "string" ? req.body.groupName.trim() : "";
+        const finalGroupName = rawGroupName || generateRandomGroupName(6);
+        const finalDescription = typeof req.body.groupDescription === "string" ? req.body.groupDescription.trim() : "";
+        const expiresAt = await calculateGroupExpiresAt(new Date());
+        group = await Group.create({
+          name: finalGroupName,
+          description: finalDescription,
+          adminUuid: target.uuid,
+          sellerUuid: target.sellerUuid,
+          createdByUuid: req.admin.uuid,
+          expiresAt,
+        });
+        target.groupUuid = group.uuid;
+        target.subscriptionExpiresAt = group.expiresAt;
+
+        await logActivity({
+          actorUuid: req.admin.uuid,
+          actorRole: req.admin.role,
+          action: "admin.group_create",
+          targetType: "group",
+          targetId: group.uuid,
+          meta: { name: group.name, adminUuid: target.uuid, mode: "make_admin" },
+          ip: req.ip,
+        }).catch(() => {});
+      } else {
+        if (!group.expiresAt) {
+          await ensureGroupExpiresAt(group, User);
+        }
+        if (!target.groupUuid) {
+          target.groupUuid = group.uuid;
+        }
+        target.subscriptionExpiresAt = group.expiresAt;
+      }
     }
     await target.save();
 
@@ -272,6 +389,94 @@ router.delete("/:uuid", async (req, res) => {
       ip: req.ip,
     });
     return res.json({ ok: true, user: publicUser(target, { getPlainEmail }) });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/** Remove a user from their group, converting them into an independent subscriber. */
+router.post("/:uuid/remove-from-group", async (req, res) => {
+  try {
+    const target = await User.findOne({ uuid: req.params.uuid, deletedAt: null });
+    if (!target || !canManageUser(req.admin, target)) {
+      return res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+    }
+
+    if (isSuperAdmin(target) || target.uuid === req.admin.uuid) {
+      return res.status(400).json({ error: "Cannot remove this account from group", code: "ROLE_FORBIDDEN" });
+    }
+
+    const previousGroupAdminUuid = target.groupAdminUuid;
+    const previousGroupUuid = target.groupUuid;
+
+    // Reset group links and set to independent subscriber
+    target.groupAdminUuid = null;
+    target.groupUuid = null;
+    target.parentUuid = null;
+    target.sellerUuid = null;
+    target.role = "subscriber";
+    target.onboardingComplete = true;
+
+    await target.save();
+
+    await logActivity({
+      actorUuid: req.admin.uuid,
+      actorRole: req.admin.role,
+      action: "admin.user_remove_from_group",
+      targetType: "user",
+      targetId: target.uuid,
+      meta: {
+        previousGroupAdminUuid,
+        previousGroupUuid,
+      },
+      ip: req.ip,
+    });
+
+    return res.json({
+      ok: true,
+      message: "User has been removed from the group and is now an independent subscriber.",
+      user: publicUser(target, { getPlainEmail }),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/** List group members for a group admin user. */
+router.get("/:uuid/group-members", async (req, res) => {
+  try {
+    const target = await User.findOne({ uuid: req.params.uuid, deletedAt: null });
+    if (!target || !canManageUser(req.admin, target)) {
+      return res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+    }
+
+    const group = await Group.findOne({
+      $or: [{ adminUuid: target.uuid }, ...(target.groupUuid ? [{ uuid: target.groupUuid }] : [])],
+    }).lean();
+
+    let members = [];
+    if (group) {
+      members = await User.find({
+        deletedAt: null,
+        uuid: { $ne: target.uuid },
+        $or: [{ groupUuid: group.uuid }, { groupAdminUuid: target.uuid }],
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+    } else {
+      members = await User.find({
+        deletedAt: null,
+        uuid: { $ne: target.uuid },
+        groupAdminUuid: target.uuid,
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+    }
+
+    return res.json({
+      group,
+      members: members.map((u) => publicUser(u, { getPlainEmail })),
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

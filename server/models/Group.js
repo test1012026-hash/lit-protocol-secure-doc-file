@@ -45,6 +45,12 @@ const groupSchema = new mongoose.Schema({
     trim: true,
     maxlength: 500,
   },
+  /** Group subscription / expiration date derived from system settings (keyRotationRemindDays). */
+  expiresAt: {
+    type: Date,
+    default: null,
+    index: true,
+  },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });

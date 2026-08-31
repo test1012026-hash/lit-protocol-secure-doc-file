@@ -9,6 +9,7 @@ const AUDIT_ACTIONS = [
   "admin.user_block",
   "admin.user_unblock",
   "admin.user_soft_delete",
+  "admin.user_remove_from_group",
   "admin.subscription_extend",
   "admin.invite_create",
   "admin.invite_revoke",
@@ -16,6 +17,7 @@ const AUDIT_ACTIONS = [
   "admin.settings_update",
   "admin.group_create",
   "admin.group_delete",
+  "admin.group_transfer_admin",
   "onboarding.subscriber",
   "onboarding.create_group",
 ];

@@ -76,9 +76,60 @@ function extendSubscription(user, periods = 1) {
   return user;
 }
 
+async function getGroupTrialDays() {
+  try {
+    const SystemSettings = require("../models/SystemSettings");
+    const settings = await SystemSettings.getOrCreate();
+    const days = Number(settings.keyRotationRemindDays);
+    if (days && days > 0) return days;
+  } catch (e) {
+    // fallback
+  }
+  return FREE_TRIAL_DAYS;
+}
+
+async function calculateGroupExpiresAt(start = new Date()) {
+  const days = await getGroupTrialDays();
+  return addDays(start, days);
+}
+
+async function syncGroupMembersExpiration(group, User) {
+  if (!group || !group.expiresAt) return;
+  const UserModel = User || require("../models/User");
+  await UserModel.updateMany(
+    {
+      deletedAt: null,
+      $or: [
+        { groupUuid: group.uuid },
+        { groupAdminUuid: group.adminUuid },
+        { uuid: group.adminUuid },
+      ],
+    },
+    {
+      $set: { subscriptionExpiresAt: new Date(group.expiresAt) },
+    }
+  );
+}
+
+async function ensureGroupExpiresAt(group, User) {
+  if (!group) return null;
+  if (!group.expiresAt) {
+    const createdAt = group.createdAt ? new Date(group.createdAt) : new Date();
+    group.expiresAt = await calculateGroupExpiresAt(createdAt);
+    await group.save();
+    await syncGroupMembersExpiration(group, User);
+  }
+  return group.expiresAt;
+}
+
 module.exports = {
   FREE_TRIAL_DAYS,
   trialExpiresFrom,
+  addDays,
+  getGroupTrialDays,
+  calculateGroupExpiresAt,
+  syncGroupMembersExpiration,
+  ensureGroupExpiresAt,
   ensureUserSubscription,
   isSubscriptionActive,
   subscriptionPayload,

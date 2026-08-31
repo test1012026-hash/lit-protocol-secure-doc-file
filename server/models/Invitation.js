@@ -13,6 +13,7 @@ const invitationSchema = new mongoose.Schema({
   parentUuid: { type: String, default: null },
   sellerUuid: { type: String, default: null },
   groupAdminUuid: { type: String, default: null },
+  groupUuid: { type: String, default: null },
   /** Optional group name when inviting a group_admin (created on accept). */
   groupName: { type: String, default: "", trim: true, maxlength: 120 },
   groupDescription: { type: String, default: "", trim: true, maxlength: 500 },

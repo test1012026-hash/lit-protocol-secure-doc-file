@@ -101,35 +101,59 @@ async function sendEmail({
   await gmail.users.messages.send({ userId: "me", requestBody: { raw } });
 }
 
-async function sendResetEmail(email, resetLink) {
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  const from = process.env.GMAIL_SENDER;
-  if (!refreshToken || !from) {
-    console.log("Password reset link (Gmail not configured):", resetLink);
-    return;
+async function sendSystemEmail({ to, subject, text, html }) {
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    try {
+      const nodemailer = require("nodemailer");
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: process.env.SMTP_SECURE === "true",
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to,
+        subject,
+        text,
+        html,
+      });
+      console.log(`System email (${subject}) sent via SMTP to:`, to);
+      return true;
+    } catch (smtpErr) {
+      console.warn("SMTP send failed, trying Gmail OAuth fallback:", smtpErr.message);
+    }
   }
 
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  const from = process.env.GMAIL_SENDER || process.env.SMTP_FROM || process.env.SMTP_USER;
+  if (refreshToken && from) {
+    try {
+      await sendEmail({ to, from, subject, text, html, refreshToken });
+      console.log(`System email (${subject}) sent via Gmail OAuth to:`, to);
+      return true;
+    } catch (gmailErr) {
+      console.error("Gmail OAuth send failed:", gmailErr.message);
+    }
+  }
+
+  console.log(`System email (${subject}) to ${to} could not be delivered (check SMTP/Gmail config).`);
+  return false;
+}
+
+async function sendResetEmail(email, resetLink) {
   const subject = "Set your SecureDocShare password";
   const text = `Click the link below to set a new password.\n\n${resetLink}\n\nThis link expires in 30 minutes.`;
-  const html = `<h2>SecureDocShare</h2><p><a href="${resetLink}">Set Password</a></p>`;
+  const html = `<h2>SecureDocShare</h2><p><a href="${resetLink}">Set Password</a></p><p>Or copy this link: ${resetLink}</p>`;
 
-  try {
-    await sendEmail({ to: email, from, subject, text, html, refreshToken });
-  } catch (err) {
-    console.error("Failed to send reset email:", err.message);
-    console.log("Password reset link:", resetLink);
-  }
+  await sendSystemEmail({ to: email, subject, text, html });
 }
 
 async function sendSignupOtpEmail(email, otp) {
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  const from = process.env.GMAIL_SENDER;
   const code = String(otp || "").trim();
-  if (!refreshToken || !from) {
-    console.log("Signup OTP (Gmail not configured):", email, code);
-    return;
-  }
-
   const subject = "Your SecureDocShare verification code";
   const text = `Your SecureDocShare signup code is: ${code}\n\nThis code is valid for 10 minutes from when it was requested. If you request a new code, this one stops working.\n\nIf you did not request it, you can ignore this email.`;
   const html = `
@@ -139,12 +163,61 @@ async function sendSignupOtpEmail(email, otp) {
     <p>This code is valid for <b>10 minutes</b> from when it was requested. Requesting a new code invalidates the previous one.</p>
   `;
 
-  try {
-    await sendEmail({ to: email, from, subject, text, html, refreshToken });
-  } catch (err) {
-    console.error("Failed to send signup OTP email:", err.message);
-    console.log("Signup OTP:", email, code);
-  }
+  await sendSystemEmail({ to: email, subject, text, html });
+}
+
+async function sendInviteEmail({
+  to,
+  inviteUrl,
+  role = "subscriber",
+  groupName = "",
+  inviterEmail = "",
+}) {
+  const formattedRole = role.replace(/_/g, " ");
+  const subject = groupName
+    ? `You're invited to join group "${groupName}" on SecureDocShare`
+    : `You're invited to join SecureDocShare as ${formattedRole}`;
+
+  const text = [
+    `You have been invited to join SecureDocShare${groupName ? ` in group "${groupName}"` : ""}.`,
+    "",
+    `Role: ${formattedRole}`,
+    inviterEmail ? `Invited by: ${inviterEmail}` : "",
+    "",
+    `Accept your invitation here:\n${inviteUrl}`,
+    "",
+    "Note: This invitation link is valid for 24 hours only. After 24 hours, the link will become inactive.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const html = `
+    <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b;border:1px solid #e2e8f0;border-radius:12px;background:#ffffff">
+      <h2 style="color:#0f172a;margin-top:0">SecureDocShare Invitation</h2>
+      <p style="font-size:15px;line-height:1.5">You have been invited to join SecureDocShare${groupName ? ` as part of group <strong>${groupName}</strong>` : ""}.</p>
+      <table style="margin:16px 0;font-size:14px;border-collapse:collapse;width:100%">
+        <tr>
+          <td style="padding:6px 0;color:#64748b;width:110px">Role:</td>
+          <td style="padding:6px 0;font-weight:600;color:#0f172a;text-transform:capitalize">${formattedRole}</td>
+        </tr>
+        ${groupName ? `<tr><td style="padding:6px 0;color:#64748b">Group:</td><td style="padding:6px 0;font-weight:600;color:#0f172a">${groupName}</td></tr>` : ""}
+        ${inviterEmail ? `<tr><td style="padding:6px 0;color:#64748b">Invited by:</td><td style="padding:6px 0;color:#0f172a">${inviterEmail}</td></tr>` : ""}
+      </table>
+      <div style="margin:24px 0">
+        <a href="${inviteUrl}" style="background-color:#0d9488;color:#ffffff;padding:12px 28px;text-decoration:none;font-weight:600;border-radius:8px;display:inline-block;font-size:15px">
+          Accept Invitation
+        </a>
+      </div>
+      <div style="background:#f8fafc;padding:12px 16px;border-radius:8px;border:1px solid #e2e8f0;margin-top:20px">
+        <p style="color:#475569;font-size:13px;margin:0">
+          <strong>Important:</strong> This invitation link is valid for <strong>24 hours</strong> only. After 24 hours, the link will expire and become inactive.
+        </p>
+      </div>
+      <p style="color:#94a3b8;font-size:12px;margin-top:20px;word-break:break-all">If the button above does not work, copy and paste this URL into your browser:<br>${inviteUrl}</p>
+    </div>
+  `;
+
+  return sendSystemEmail({ to, subject, text, html });
 }
 
 async function sendEncryptedFileEmail({
@@ -326,6 +399,8 @@ async function sendPlainFileEmail({
 module.exports = {
   sendResetEmail,
   sendSignupOtpEmail,
+  sendInviteEmail,
+  sendSystemEmail,
   sendEncryptedFileEmail,
   sendPlainFileEmail,
 };

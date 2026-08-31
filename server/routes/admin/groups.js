@@ -17,11 +17,18 @@ const { validateBody } = require("../../middleware/validate");
 const {
   resellerCreateGroupSchema,
   updateGroupSchema,
+  transferGroupAdminSchema,
 } = require("../../validation/schemas");
 const { logActivity } = require("../../lib/activityLog");
+const { sendInviteEmail } = require("../../lib/mail");
+const {
+  calculateGroupExpiresAt,
+  ensureGroupExpiresAt,
+  syncGroupMembersExpiration,
+} = require("../../lib/subscription");
 
 const router = express.Router();
-const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function publicGroup(group, adminUser = null) {
   if (!group) return null;
@@ -34,6 +41,7 @@ function publicGroup(group, adminUser = null) {
     createdByUuid: group.createdByUuid || null,
     adminEmail: adminUser ? getPlainEmail(adminUser) : null,
     adminName: adminUser?.name || "",
+    expiresAt: group.expiresAt || null,
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
   };
@@ -78,7 +86,12 @@ router.get("/", async (req, res) => {
       return res.json({ groups: [] });
     }
 
-    const groups = await Group.find(filter).sort({ createdAt: -1 }).lean();
+    const groups = await Group.find(filter).sort({ createdAt: -1 });
+    for (const g of groups) {
+      if (!g.expiresAt) {
+        await ensureGroupExpiresAt(g, User);
+      }
+    }
     const adminUuids = [...new Set(groups.map((g) => g.adminUuid))];
     const admins = await User.find({ uuid: { $in: adminUuids } }).lean();
     const byUuid = Object.fromEntries(admins.map((u) => [u.uuid, u]));
@@ -94,9 +107,12 @@ router.get("/", async (req, res) => {
 /** Current user's group (if they are group_admin). */
 router.get("/mine", async (req, res) => {
   try {
-    const group = await Group.findOne({ adminUuid: req.admin.uuid }).lean();
+    const group = await Group.findOne({ adminUuid: req.admin.uuid });
     if (!group) {
       return res.json({ group: null });
+    }
+    if (!group.expiresAt) {
+      await ensureGroupExpiresAt(group, User);
     }
     return res.json({ group: publicGroup(group, req.admin) });
   } catch (err) {
@@ -149,10 +165,13 @@ router.post("/", validateBody(resellerCreateGroupSchema), async (req, res) => {
         });
       }
 
+      const expiresAt = await calculateGroupExpiresAt(new Date());
+
       existingUser.role = "group_admin";
       existingUser.parentUuid = actor.uuid;
       existingUser.sellerUuid = sellerUuid;
       existingUser.groupAdminUuid = existingUser.uuid;
+      existingUser.subscriptionExpiresAt = expiresAt;
       existingUser.onboardingComplete = true;
       await existingUser.save();
 
@@ -162,9 +181,12 @@ router.post("/", validateBody(resellerCreateGroupSchema), async (req, res) => {
         adminUuid: existingUser.uuid,
         sellerUuid,
         createdByUuid: actor.uuid,
+        expiresAt,
       });
       existingUser.groupUuid = group.uuid;
       await existingUser.save();
+
+      await syncGroupMembersExpiration(group, User);
 
       await logActivity({
         actorUuid: actor.uuid,
@@ -227,6 +249,18 @@ router.post("/", validateBody(resellerCreateGroupSchema), async (req, res) => {
       "http://localhost:5174"
     ).replace(/\/$/, "");
 
+    const inviteUrl = `${appBase}/accept-invite?token=${token}`;
+
+    await sendInviteEmail({
+      to: adminEmail,
+      inviteUrl,
+      role: "group_admin",
+      groupName: name,
+      inviterEmail: getPlainEmail(actor),
+    }).catch((err) => {
+      console.error("Failed to send group invite email:", err.message);
+    });
+
     return res.status(201).json({
       mode: "invited",
       invitation: {
@@ -237,7 +271,7 @@ router.post("/", validateBody(resellerCreateGroupSchema), async (req, res) => {
         status: invite.status,
         expiresAt: invite.expiresAt,
       },
-      inviteUrl: `${appBase}/accept-invite?token=${token}`,
+      inviteUrl,
       message:
         "Invite sent. When they accept, the group will be created and they become group admin.",
     });
@@ -248,6 +282,143 @@ router.post("/", validateBody(resellerCreateGroupSchema), async (req, res) => {
     });
   }
 });
+
+/** List members belonging to this group (excluding the current group admin). */
+router.get("/:uuid/members", async (req, res) => {
+  try {
+    const group = await Group.findOne({ uuid: req.params.uuid });
+    if (!group || !(await assertCanManageGroup(req.admin, group))) {
+      return res.status(404).json({ error: "Group not found", code: "GROUP_NOT_FOUND" });
+    }
+
+    const members = await User.find({
+      deletedAt: null,
+      uuid: { $ne: group.adminUuid },
+      $or: [{ groupUuid: group.uuid }, { groupAdminUuid: group.adminUuid }],
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const adminUser = await User.findOne({ uuid: group.adminUuid }).lean();
+
+    return res.json({
+      group: publicGroup(group, adminUser),
+      members: members.map((u) => publicUser(u, { getPlainEmail })),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Transfer group admin to another member of the group.
+ * Demotes the previous group admin to a normal subscriber for this group.
+ */
+router.post(
+  "/:uuid/transfer-admin",
+  validateBody(transferGroupAdminSchema),
+  async (req, res) => {
+    try {
+      const group = await Group.findOne({ uuid: req.params.uuid });
+      if (!group || !(await assertCanManageGroup(req.admin, group))) {
+        return res.status(404).json({ error: "Group not found", code: "GROUP_NOT_FOUND" });
+      }
+
+      if (!isSuperAdmin(req.admin) && req.admin.role !== "reseller") {
+        return res.status(403).json({
+          error: "Only resellers and super admins can reassign group admins",
+          code: "ROLE_FORBIDDEN",
+        });
+      }
+
+      const { newAdminUuid } = req.body;
+      if (newAdminUuid === group.adminUuid) {
+        return res.status(400).json({
+          error: "User is already the group admin",
+          code: "ALREADY_ADMIN",
+        });
+      }
+
+      const newAdminUser = await User.findOne({ uuid: newAdminUuid, deletedAt: null });
+      if (!newAdminUser) {
+        return res.status(404).json({ error: "Selected member not found", code: "USER_NOT_FOUND" });
+      }
+
+      const oldAdminUser = await User.findOne({ uuid: group.adminUuid, deletedAt: null });
+
+      // Promote new member to group_admin
+      newAdminUser.role = "group_admin";
+      newAdminUser.groupAdminUuid = newAdminUser.uuid;
+      newAdminUser.groupUuid = group.uuid;
+      newAdminUser.parentUuid = group.sellerUuid || req.admin.uuid;
+      newAdminUser.sellerUuid = group.sellerUuid || req.admin.sellerUuid || req.admin.uuid;
+      newAdminUser.onboardingComplete = true;
+      await newAdminUser.save();
+
+      // Demote previous group admin to normal subscriber for this group
+      if (oldAdminUser) {
+        oldAdminUser.role = "subscriber";
+        oldAdminUser.groupAdminUuid = newAdminUser.uuid;
+        oldAdminUser.parentUuid = newAdminUser.uuid;
+        oldAdminUser.groupUuid = group.uuid;
+        oldAdminUser.sellerUuid = group.sellerUuid || newAdminUser.sellerUuid;
+        await oldAdminUser.save();
+      }
+
+      // Re-link all other members of the group to the new group admin
+      const excludedUuids = [newAdminUser.uuid];
+      if (oldAdminUser) excludedUuids.push(oldAdminUser.uuid);
+
+      await User.updateMany(
+        {
+          deletedAt: null,
+          uuid: { $nin: excludedUuids },
+          $or: [{ groupUuid: group.uuid }, { groupAdminUuid: group.adminUuid }],
+        },
+        {
+          $set: {
+            groupAdminUuid: newAdminUser.uuid,
+            parentUuid: newAdminUser.uuid,
+            groupUuid: group.uuid,
+          },
+        },
+      );
+
+      // Update Group record with new admin
+      group.adminUuid = newAdminUser.uuid;
+      if (!group.expiresAt) {
+        await ensureGroupExpiresAt(group, User);
+      } else {
+        await group.save();
+        await syncGroupMembersExpiration(group, User);
+      }
+
+      await logActivity({
+        actorUuid: req.admin.uuid,
+        actorRole: req.admin.role,
+        action: "admin.group_transfer_admin",
+        targetType: "group",
+        targetId: group.uuid,
+        meta: {
+          groupName: group.name,
+          oldAdminUuid: oldAdminUser ? oldAdminUser.uuid : null,
+          newAdminUuid: newAdminUser.uuid,
+        },
+        ip: req.ip,
+      });
+
+      return res.json({
+        ok: true,
+        message: `Group admin transferred to ${getPlainEmail(newAdminUser)}. Former admin is now a subscriber in this group.`,
+        group: publicGroup(group, newAdminUser),
+        newAdmin: publicUser(newAdminUser, { getPlainEmail }),
+        oldAdmin: oldAdminUser ? publicUser(oldAdminUser, { getPlainEmail }) : null,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 router.patch("/:uuid", validateBody(updateGroupSchema), async (req, res) => {
   try {

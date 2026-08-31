@@ -220,24 +220,6 @@ async function findUserByEmail(UserModel, rawEmail, extraQuery = {}) {
     }
   }
 
-  if (user) {
-    console.log("[findUserByEmail]", {
-      lookup: email,
-      match,
-      uuid: user.uuid,
-      microsoftId: user.microsoftId || null,
-      primaryEmail: (() => {
-        try {
-          return getPlainEmail(user);
-        } catch {
-          return null;
-        }
-      })(),
-    });
-  } else {
-    console.log("[findUserByEmail] NOT FOUND", { lookup: email });
-  }
-
   return user;
 }
 

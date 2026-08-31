@@ -290,12 +290,18 @@ const updateGroupSchema = z.object({
   description: z.string().trim().max(500).optional(),
 });
 
+const transferGroupAdminSchema = z.object({
+  newAdminUuid: z.string().min(1, "New admin UUID is required"),
+});
+
 const adminUpdateUserSchema = z.object({
   name: z.string().trim().max(200).optional(),
   phone: z.string().trim().max(40).optional(),
   country: z.string().trim().max(80).optional(),
   company: z.string().trim().max(200).optional(),
   role: z.enum(["reseller", "group_admin", "subscriber"]).optional(),
+  groupName: z.string().trim().max(120).optional().or(z.literal("")),
+  groupDescription: z.string().trim().max(500).optional().or(z.literal("")),
   subscriptionExpiresAt: z.union([z.string().datetime(), z.null()]).optional(),
 });
 
@@ -312,7 +318,7 @@ const systemSettingsUpdateSchema = z.object({
 
 const acceptInviteSchema = z.object({
   token: z.string().min(20),
-  password: adminPasswordSchema,
+  password: adminPasswordSchema.optional().or(z.literal("")),
   name: z.string().trim().max(200).optional().default(""),
   acceptTerms: z
     .boolean()
