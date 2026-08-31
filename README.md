@@ -1,6 +1,6 @@
 # SecureDocShare
 
-Chrome extension + Node/Express + MongoDB app for sending encrypted documents. Only the intended recipient can decrypt them, using **Lit Protocol v3 (Chipotle)** and Google identity checks.
+Chrome extension + Node/Express + MongoDB app for sending encrypted documents. Only the intended recipient can decrypt them, using **RSA** and Google identity checks.
 
 ---
 
@@ -12,15 +12,13 @@ Chrome extension + Node/Express + MongoDB app for sending encrypted documents. O
 | **MongoDB** | Local install or [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) |
 | **Google Chrome** | Required to load the extension |
 | **Google Cloud OAuth client** | For “Continue with Google” |
-| **Lit v3 account** | API key + PKP ID from the [Lit Dashboard](https://dashboard.dev.litprotocol.com) |
-| **Alchemy Solana API key** (optional) | Improves Solana RPC; public devnet works without it |
 
 ---
 
 ## Project structure
 
 ```
-lit-protocol-secure-doc-file/
+Secure-doc-file/
 ├── server/          Express API + MongoDB
 │   ├── .env.example
 │   └── index.js
@@ -141,13 +139,6 @@ Edit `extension/.env`:
 | `VITE_API_BASE_URL` | Yes | Backend API URL (default `http://localhost:4000/api`) |
 | `VITE_GOOGLE_CLIENT_ID` | Yes | Same as `GOOGLE_CLIENT_ID` in `server/.env` |
 | `VITE_EXTENSION_ID` | Yes | Chrome extension ID (set after first load — see below) |
-| `VITE_LIT_API_BASE` | No | Default `https://api.chipotle.litprotocol.com/core/v1` |
-| `VITE_LIT_API_KEY` | Yes | Lit v3 API key |
-| `VITE_LIT_PKP_ID` | Yes | Lit PKP ID used for encrypt/decrypt |
-| `VITE_SOLANA_ALCHEMY_API_KEY` | No | Alchemy Solana key (recommended) |
-| `VITE_SOLANA_NETWORK` | No | `devnet` or `mainnet-beta` (default `devnet`) |
-| `VITE_SOLANA_PUBLIC_KEY` | No | Optional Solana test wallet pubkey |
-| `VITE_SOLANA_SECRET_KEY` | No | Optional Solana test wallet secret (base58) |
 
 Also set the same Google client ID in `extension/manifest.json`:
 
@@ -197,7 +188,7 @@ npm run build
 4. Select this folder (not the repo root):
 
    ```
-   lit-protocol-secure-doc-file/extension/dist
+   Secure-doc-file/extension/dist
    ```
 
 5. Confirm **SecureDocShare** appears in the list and is enabled.
@@ -251,31 +242,7 @@ chrome.identity.getRedirectURL()
 
 ---
 
-## 7. Lit Protocol v3 (Chipotle)
-
-Datil and Naga networks are retired. This app uses Lit v3 Chipotle over HTTP.
-
-1. Sign up at the [Lit Dashboard](https://dashboard.dev.litprotocol.com).
-2. Create an API key and a PKP.
-3. Set in `extension/.env`:
-
-   ```env
-   VITE_LIT_API_KEY=your-api-key
-   VITE_LIT_PKP_ID=your-pkp-id
-   ```
-
-4. Ensure the account has credits (a `402` error means funding is needed).
-
-**Flow:**
-
-- **Encrypt** — extension calls Chipotle; file bytes are encrypted with the PKP  
-- **Decrypt** — Lit Action verifies the recipient’s Google ID token email, then decrypts  
-
-Docs: [developer.litprotocol.com](https://developer.litprotocol.com)
-
----
-
-## 8. Smoke test
+## 7. Smoke test
 
 With server and extension both running:
 
@@ -292,10 +259,10 @@ Password reset (optional): request a reset; without SMTP, the link is printed in
 ## How it works
 
 1. User logs in → server returns a JWT and user UUID.  
-2. Sender picks recipient email + file → extension encrypts via Lit Chipotle.  
+2. Sender picks recipient email + file → extension encrypts.  
 3. Extension posts ciphertext to `POST /api/files/send`.  
 4. Recipient signs in and sees the file in Inbox.  
-5. On decrypt, extension sends the Google ID token into a Lit Action that checks email + `aud`, then decrypts.  
+5. On decrypt, extension sends the Google ID token into database that checks email + `aud`, then decrypts.  
 6. Decrypted bytes are saved with `chrome.downloads.download()`.
 
 ---
@@ -321,15 +288,7 @@ Do not commit `.env` files (they are gitignored).
 | `Extension ID mismatch` | Set `VITE_EXTENSION_ID` to the ID on `chrome://extensions`, rebuild, reload |
 | Google `redirect_uri_mismatch` | Add `https://<EXTENSION_ID>.chromiumapp.org` in Google Cloud Console |
 | Backend not reachable | Confirm `npm run dev` in `server/` and `VITE_API_BASE_URL=http://localhost:4000/api` |
-| Lit `402 Payment Required` | Add credits in the Lit Dashboard |
-| Decrypt fails for old files | Re-send the file; older ciphertext formats may not match the current Lit Action |
+| Decrypt fails for old files | Re-send the file; older ciphertext formats may not match the current uuid |
 | Popup shows “Loading…” forever | Check the service worker / popup console for missing env vars |
 
 ---
-
-## Security notes
-
-- Lit enforces decrypt gating inside the Lit Action; a compromised backend alone cannot decrypt ciphertext.  
-- The Lit Action verifies Google tokens via `oauth2.googleapis.com/tokeninfo` and checks email + `aud`.  
-- Passwords are hashed with bcrypt.  
-- Keep `JWT_SECRET`, Lit API keys, and wallet secrets only in `.env`.
