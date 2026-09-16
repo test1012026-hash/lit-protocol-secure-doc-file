@@ -231,6 +231,7 @@ async function sendEncryptedFileEmail({
   encryptedPackageText = "",
   gmailAccessToken,
   senderRefreshToken,
+  mailMetadata = null,
 }) {
   if (!gmailAccessToken && !senderRefreshToken) {
     throw new Error("Gmail access token is required to send as your address.");
@@ -243,6 +244,8 @@ async function sendEncryptedFileEmail({
   // File packages stay on the attachment — do not convert the attachment into Message.
   const displayMessage = String(message || "").trim();
   const hasAttachment = Boolean(attachmentBase64);
+  const metaText = mailMetadata?.textBlock || "";
+  const metaHtml = mailMetadata?.htmlBlock || "";
 
   const openButton = openUrl
     ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`
@@ -260,6 +263,7 @@ async function sendEncryptedFileEmail({
       ? "To open the file: Open SecureDocShare → Receive → Upload file → Decrypt."
       : "",
     openUrl ? `\nOpen extension: ${openUrl}` : "",
+    metaText ? `\n${metaText}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -297,7 +301,8 @@ ${openButton}
 </p>
 <p style="color:gray">${
    "Only the recipient account can decrypt this file."
-  }</p>
+  }</p> <br/><br/>
+${metaHtml}
 `;
 
   await sendEmail({

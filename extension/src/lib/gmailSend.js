@@ -27,6 +27,7 @@ export async function sendEncryptedEmailViaGmail({
   attachmentBase64,
   attachmentBytes,
   appUrl,
+  mailMetadata = null,
   onProgress,
 }) {
   if (!accessToken) throw new Error("Gmail access token is required.");
@@ -39,6 +40,7 @@ export async function sendEncryptedEmailViaGmail({
     message,
     hasAttachment,
     appUrl,
+    mailMetadata,
   });
 
   const mimeBlob = createMimeRfc822Blob({

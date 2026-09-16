@@ -239,4 +239,102 @@ router.post("/inspect", requireRoles("super_admin"), async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/cipher/inspect-metadata
+ * Paste SecureDocShare mail metadata (sdmeta.v1.… or email:/uuid: lines).
+ * Decrypts email + uuid and returns matching user from the database.
+ */
+router.post(
+  "/inspect-metadata",
+  requireRoles("super_admin"),
+  async (req, res) => {
+    try {
+      const { parseMailMetadata } = require("../../lib/mailMetadata");
+      const {
+        findUserByEmail,
+        hashEmail,
+      } = require("../../lib/emailCrypto");
+
+      const body = req.body || {};
+      const metadataText =
+        body.metadataText ||
+        body.metadata ||
+        body.token ||
+        body.text ||
+        "";
+
+      const parsed = parseMailMetadata(metadataText);
+      if (!parsed.ok) {
+        return res.status(400).json({
+          ok: false,
+          error: parsed.error || "Could not parse metadata",
+          code: "METADATA_PARSE_FAILED",
+          metadata: {
+            emailEnc: parsed.emailEnc || null,
+            uuidEnc: parsed.uuidEnc || null,
+          },
+        });
+      }
+
+      let user = null;
+      let matchedBy = null;
+      if (parsed.uuid) {
+        user = await User.findOne({
+          uuid: parsed.uuid,
+          deletedAt: null,
+        }).lean();
+        if (user) matchedBy = "uuid";
+      }
+      if (!user && parsed.email) {
+        user = await findUserByEmail(User, parsed.email);
+        if (user) matchedBy = "email";
+      }
+
+      const recipient = recipientSummary(user);
+
+      await logActivity({
+        actorUuid: req.admin.uuid,
+        actorRole: req.admin.role,
+        action: "admin.cipher_inspect_metadata",
+        targetType: "user",
+        targetUuid: recipient.uuid || null,
+        meta: {
+          matchedBy,
+          hasEmail: Boolean(parsed.email),
+          hasUuid: Boolean(parsed.uuid),
+          recipientFound: recipient.found,
+        },
+      }).catch(() => {});
+
+      return res.json({
+        ok: true,
+        metadata: {
+          token: parsed.token,
+          emailEnc: parsed.emailEnc,
+          uuidEnc: parsed.uuidEnc,
+          messageUuidHash: parsed.messageUuidHash || null,
+          email: parsed.email,
+          uuid: parsed.uuid,
+          emailHash: parsed.email ? hashEmail(parsed.email) : null,
+          decryptError: parsed.error || null,
+        },
+        matchedBy,
+        recipient,
+        uuid: recipient.uuid || parsed.uuid || null,
+        uuidResolved: recipient.found,
+        note: recipient.found
+          ? `User found in database via ${matchedBy}.`
+          : "Metadata decrypted, but no matching user in the database.",
+      });
+    } catch (err) {
+      console.error("[admin/cipher/inspect-metadata]", err);
+      return res.status(500).json({
+        ok: false,
+        error: err.message || "Metadata inspect failed",
+        code: "METADATA_INSPECT_FAILED",
+      });
+    }
+  },
+);
+
 module.exports = router;

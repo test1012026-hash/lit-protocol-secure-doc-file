@@ -251,6 +251,7 @@ async function encryptOnly(options = {}) {
     messageCipherText: data.messageCipherText || null,
     fileCipherText: data.fileCipherText || null,
     attachment: data.attachment || null,
+    mailMetadata: data.mailMetadata || null,
   });
 }
 

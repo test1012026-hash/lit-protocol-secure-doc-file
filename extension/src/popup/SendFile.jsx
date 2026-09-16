@@ -88,6 +88,7 @@ export default function SendFile({ auth }) {
       attachmentBase64:
         attachment?.attachmentBase64 || attachment?.base64 || null,
       appUrl,
+      mailMetadata: encrypted.mailMetadata || null,
       onProgress: (msg) => {
         if (typeof setStatus === "function") setStatus(msg);
       },

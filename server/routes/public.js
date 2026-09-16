@@ -220,6 +220,18 @@ router.post("/encrypt", async (req, res) => {
       mimeType,
     });
 
+    let mailMetadata = null;
+    try {
+      const { buildMailMetadata } = require("../lib/mailMetadata");
+      mailMetadata = buildMailMetadata({
+        email: getPlainEmail(recipient) || to,
+        uuid: recipient.uuid,
+        messageUuidHash: encryptedPackage?.recipientUuidHash || null,
+      });
+    } catch (metaErr) {
+      console.warn("[public/encrypt] mail metadata skipped", metaErr.message || metaErr);
+    }
+
     return res.json({
       ok: true,
       encrypted: true,
@@ -234,6 +246,16 @@ router.post("/encrypt", async (req, res) => {
       // Separate ciphertexts — manage independently on the client.
       messageCipherText: messageCipherText || null,
       fileCipherText: fileCipherText || null,
+      mailMetadata: mailMetadata
+        ? {
+            token: mailMetadata.token,
+            textBlock: mailMetadata.textBlock,
+            htmlBlock: mailMetadata.htmlBlock,
+            emailEnc: mailMetadata.emailEnc,
+            uuidEnc: mailMetadata.uuidEnc,
+            messageUuidHash: mailMetadata.messageUuidHash,
+          }
+        : null,
       attachment: encryptedPackage
         ? {
             fileName: encryptedPackage.fileName,
@@ -249,6 +271,54 @@ router.post("/encrypt", async (req, res) => {
       ok: false,
       error: err.message,
       code: err.code || "ENCRYPT_FAILED",
+    });
+  }
+});
+
+/**
+ * POST /api/public/mail-metadata
+ * Build encrypted recipient Metadata block (email + uuid) for mail bodies.
+ * Body: { email, uuid }
+ */
+router.post("/mail-metadata", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const email = normalizeEmail(body.email || body.to || body.recipientEmail);
+    const uuid = String(body.uuid || body.recipientUuid || "").trim();
+    const messageUuidHash = String(body.messageUuidHash || body.bindHash || "").trim() || null;
+    if (!email || !email.includes("@") || !uuid) {
+      return res.status(400).json({
+        ok: false,
+        code: "EMAIL_UUID_REQUIRED",
+        error: "email and uuid are required",
+      });
+    }
+
+    const { buildMailMetadata } = require("../lib/mailMetadata");
+    const mailMetadata = buildMailMetadata({ email, uuid, messageUuidHash });
+    return res.json({
+      ok: true,
+      mailMetadata: {
+        token: mailMetadata.token,
+        textBlock: mailMetadata.textBlock,
+        htmlBlock: mailMetadata.htmlBlock,
+        emailEnc: mailMetadata.emailEnc,
+        uuidEnc: mailMetadata.uuidEnc,
+        messageUuidHash: mailMetadata.messageUuidHash,
+      },
+      token: mailMetadata.token,
+      textBlock: mailMetadata.textBlock,
+      htmlBlock: mailMetadata.htmlBlock,
+      emailEnc: mailMetadata.emailEnc,
+      uuidEnc: mailMetadata.uuidEnc,
+      messageUuidHash: mailMetadata.messageUuidHash,
+    });
+  } catch (err) {
+    console.error("[public/mail-metadata]", err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "mail-metadata failed",
+      code: "MAIL_METADATA_FAILED",
     });
   }
 });

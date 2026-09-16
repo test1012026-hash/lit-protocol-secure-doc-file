@@ -20,6 +20,7 @@ const {
   findUserByEmail,
   resolveEncryptRecipient,
 } = require("../lib/emailCrypto");
+const { buildMailMetadata } = require("../lib/mailMetadata");
 const {
   ensureUserSubscription,
   isSubscriptionActive,
@@ -197,6 +198,17 @@ router.post(
       const subjectText =
         subject || (hasFile ? fileName || "document.pdf" : "Secure message");
 
+      let mailMetadata = null;
+      try {
+        mailMetadata = buildMailMetadata({
+          email: getPlainEmail(recipient) || normalizeEmail(recipientEmail),
+          uuid: recipient.uuid,
+          messageUuidHash: encryptedPackage?.recipientUuidHash || null,
+        });
+      } catch (metaErr) {
+        console.warn("[encrypt] mail metadata skipped", metaErr.message || metaErr);
+      }
+
       res.json({
         recipientUuid: recipient.uuid,
         recipientEmail: getPlainEmail(recipient),
@@ -206,6 +218,16 @@ router.post(
         messageCipherText: messageCipherText || null,
         fileCipherText: fileCipherText || null,
         filename: hasFile ? fileName || "document.pdf" : "message.txt",
+        mailMetadata: mailMetadata
+          ? {
+              token: mailMetadata.token,
+              textBlock: mailMetadata.textBlock,
+              htmlBlock: mailMetadata.htmlBlock,
+              emailEnc: mailMetadata.emailEnc,
+              uuidEnc: mailMetadata.uuidEnc,
+              messageUuidHash: mailMetadata.messageUuidHash,
+            }
+          : null,
         attachment: encryptedPackage
           ? {
               fileName: encryptedPackage.fileName,
@@ -452,6 +474,11 @@ router.post("/smart-send", validateBody(smartSendSchema), async (req, res) => {
         attachmentBase64,
         encryptedPackageText: messageCipherText || "",
         senderRefreshToken: systemRefresh,
+        mailMetadata: buildMailMetadata({
+          email: getPlainEmail(subscriber) || normalizeEmail(to),
+          uuid: subscriber.uuid,
+          messageUuidHash: encryptedPackage?.recipientUuidHash || null,
+        }),
       });
     } catch (mailErr) {
       return res.status(502).json({
@@ -582,6 +609,11 @@ router.post(
           attachmentBase64,
           encryptedPackageText: messageCipherText || "",
           senderRefreshToken: sender.gmailRefreshToken,
+          mailMetadata: buildMailMetadata({
+            email: getPlainEmail(recipient) || normalizeEmail(recipientEmail),
+            uuid: recipient.uuid,
+            messageUuidHash: encryptedPackage?.recipientUuidHash || null,
+          }),
         });
       } catch (mailErr) {
         const msg = mailErr.message || "Gmail send failed";
@@ -674,6 +706,16 @@ router.post(
       const normalizedSubject = subject || filename || "Untitled document";
       const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
       const senderEmail = getPlainEmail(sender);
+      let mailMetadata = null;
+      try {
+        mailMetadata = buildMailMetadata({
+          email: getPlainEmail(recipient) || normalizeEmail(recipientEmail),
+          uuid: recipient.uuid,
+          messageUuidHash: encryptedPackage?.recipientUuidHash || null,
+        });
+      } catch (metaErr) {
+        console.warn("[send] mail metadata skipped", metaErr.message || metaErr);
+      }
 
       // Default path: extension sends the email (avoids Vercel 4.5MB body limit).
       if (clientSend !== false || !encryptedPackageBase64) {
@@ -691,6 +733,16 @@ router.post(
           from: senderEmail,
           subject: normalizedSubject,
           appUrl,
+          mailMetadata: mailMetadata
+            ? {
+                token: mailMetadata.token,
+                textBlock: mailMetadata.textBlock,
+                htmlBlock: mailMetadata.htmlBlock,
+                emailEnc: mailMetadata.emailEnc,
+                uuidEnc: mailMetadata.uuidEnc,
+                messageUuidHash: mailMetadata.messageUuidHash,
+              }
+            : null,
         });
       }
 
@@ -707,6 +759,7 @@ router.post(
           encryptedPackageText: encryptedPackageText || "",
           gmailAccessToken,
           senderRefreshToken: sender.gmailRefreshToken,
+          mailMetadata,
         });
       } catch (mailErr) {
         const msg = mailErr.message || "Gmail send failed";

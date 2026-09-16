@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { normalizeEmail } = require("./email");
 
 const ENC_PREFIX = "enc:v1:";
+const UUID_ENC_PREFIX = "uid:v1:";
 
 /** Personal Microsoft mailbox domains that often share one account / oid. */
 const MS_CONSUMER_DOMAINS = [
@@ -80,6 +81,55 @@ function decryptEmail(stored) {
     decipher.final(),
   ]).toString("utf8");
   return normalizeEmail(plain);
+}
+
+function isEncryptedUuid(value) {
+  return String(value || "").startsWith(UUID_ENC_PREFIX);
+}
+
+/** AES-256-GCM ciphertext for a user UUID (same key material as email). */
+function encryptUuid(rawUuid) {
+  const uuid = String(rawUuid || "").trim();
+  if (!uuid) return "";
+  const key = emailKeyMaterial();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const enc = Buffer.concat([
+    cipher.update(`uuid|${uuid}`, "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  return (
+    UUID_ENC_PREFIX +
+    Buffer.concat([iv, tag, enc]).toString("base64url")
+  );
+}
+
+function decryptUuid(stored) {
+  const value = String(stored || "");
+  if (!value) return "";
+  if (!isEncryptedUuid(value)) return String(value).trim();
+
+  const buf = Buffer.from(value.slice(UUID_ENC_PREFIX.length), "base64url");
+  if (buf.length < 12 + 16) {
+    throw new Error("Corrupt encrypted uuid");
+  }
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const data = buf.subarray(28);
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    emailKeyMaterial(),
+    iv,
+  );
+  decipher.setAuthTag(tag);
+  const plain = Buffer.concat([
+    decipher.update(data),
+    decipher.final(),
+  ]).toString("utf8");
+  const m = /^uuid\|(.+)$/.exec(plain);
+  if (!m) throw new Error("Invalid encrypted uuid payload");
+  return String(m[1] || "").trim();
 }
 
 /** Set encrypted email + lookup hash on a mongoose doc / plain object. */
@@ -449,6 +499,9 @@ module.exports = {
   encryptEmail,
   decryptEmail,
   isEncryptedEmail,
+  encryptUuid,
+  decryptUuid,
+  isEncryptedUuid,
   applyEncryptedEmail,
   getPlainEmail,
   findUserByEmail,
@@ -457,4 +510,6 @@ module.exports = {
   resolveEncryptRecipient,
   expandMicrosoftConsumerAliases,
   MS_CONSUMER_DOMAINS,
+  ENC_PREFIX,
+  UUID_ENC_PREFIX,
 };

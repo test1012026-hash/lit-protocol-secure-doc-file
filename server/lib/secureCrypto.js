@@ -555,12 +555,25 @@ function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
   };
 }
 
+function encryptedFileStem(baseName, recipientUuid, kind) {
+  const stem =
+    String(baseName || "")
+      .replace(/\.[^./\\]+$/, "")
+      .trim() || "secure-package";
+  const uuid = String(recipientUuid || "").trim();
+  if (kind !== "file" || !uuid) return stem;
+  const suffix = `-${uuid}`;
+  if (stem.endsWith(suffix) || stem.endsWith(uuid)) return stem;
+  return `${stem}${suffix}`;
+}
+
 function buildEncryptedPackage({
   ciphertext,
   ciphertextBytes,
   iv,
   wrappedKey,
   recipientUuidHash,
+  recipientUuid = null,
   actionId,
   expectedEmail,
   filename,
@@ -570,8 +583,11 @@ function buildEncryptedPackage({
   kind = "bundle",
 }) {
   const safeFileName = filename || "secure-package.json";
-  const encryptedName =
-    safeFileName.replace(/\.[^./\\]+$/, "") || "secure-package";
+  const encryptedName = encryptedFileStem(
+    safeFileName,
+    recipientUuid,
+    kind,
+  );
 
   const cipherBytes =
     ciphertextBytes ||
@@ -810,6 +826,7 @@ function encryptMailPayload({
       String(fileName || "document").replace(/\.[^./\\]+$/, "") || "document";
     encryptedPackage = buildEncryptedPackage({
       ...encryptedFile,
+      recipientUuid,
       expectedEmail: recipientEmail,
       filename: fileName || `${packageName}.pdf`,
       mimeType: mimeType || "application/pdf",

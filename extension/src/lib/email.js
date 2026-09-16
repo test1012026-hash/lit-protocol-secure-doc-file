@@ -102,11 +102,19 @@ export function normalizeEmail(raw) {
   return new Blob(blobs, { type: "message/rfc822" });
 }
 
-export function buildEmailBodies({ senderEmail, message, hasAttachment, appUrl }) {
+export function buildEmailBodies({
+  senderEmail,
+  message,
+  hasAttachment,
+  appUrl,
+  mailMetadata = null,
+}) {
   const displayMessage = String(message || "").trim();
   const openUrl = appUrl
     ? `${String(appUrl).replace(/\/$/, "")}/open-extension`
     : null;
+  const metaText = mailMetadata?.textBlock || "";
+  const metaHtml = mailMetadata?.htmlBlock || "";
 
   const openButton = openUrl
     ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`
@@ -124,6 +132,7 @@ export function buildEmailBodies({ senderEmail, message, hasAttachment, appUrl }
       ? "To open the file: Open SecureDocShare → Receive → Upload file → Decrypt."
       : "",
     openUrl ? `\nOpen extension: ${openUrl}` : "",
+    metaText ? `\n${metaText}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -154,6 +163,7 @@ ${hasAttachment ? "<li>Upload the attachment to decrypt the file</li>" : ""}
 ${openButton}
 <p style="color:gray">Log in with the recipient account to decrypt.</p>
 <p style="color:gray">Only the recipient account can decrypt this file.</p>
+${metaHtml}
 `;
 
   return { text, html };
