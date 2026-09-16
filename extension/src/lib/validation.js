@@ -75,7 +75,7 @@ export const sendFileFormSchema = z
     if (!hasMessage && !hasFile) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Add a message or a PDF (or both)",
+        message: "Add a message or a file (or both)",
         path: ["message"],
       });
       return;
@@ -83,16 +83,6 @@ export const sendFileFormSchema = z
 
     if (!hasFile) return;
 
-    if (
-      file.type !== "application/pdf" &&
-      !file.name.toLowerCase().endsWith(".pdf")
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Only PDF files are allowed",
-        path: ["file"],
-      });
-    }
     if (file.size <= 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -103,7 +93,7 @@ export const sendFileFormSchema = z
     if (file.size > 20 * 1024 * 1024) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "PDF must be 20MB or smaller",
+        message: "File must be 20MB or smaller",
         path: ["file"],
       });
     }
@@ -112,16 +102,15 @@ export const sendFileFormSchema = z
 export const receiveFileFormSchema = z.object({
   encryptedFile: z
     .custom((value) => value instanceof File, {
-      message: "Choose the encrypted .securepdf file",
+      message: "Choose the encrypted SecureDoc file",
     })
     .refine(
       (file) =>
-        file.name.toLowerCase().endsWith(".securepdf") ||
-        file.name.toLowerCase().endsWith(".securemsg") ||
+        /\.secure[a-z0-9]+$/i.test(file.name) ||
         file.type === "application/json" ||
         file.type === "application/octet-stream" ||
         file.type === "text/plain",
-      "Upload a .securepdf or .securemsg file",
+      "Upload a .secure* file (e.g. .securepdf, .secureimage)",
     )
     .refine((file) => file.size > 0, "Selected file is empty")
     .refine(

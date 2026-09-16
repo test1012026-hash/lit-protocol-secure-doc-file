@@ -245,7 +245,8 @@ async function sendEncryptedFileEmail({
   const displayMessage = String(message || "").trim();
   const hasAttachment = Boolean(attachmentBase64);
   const metaText = mailMetadata?.textBlock || "";
-  const metaHtml = mailMetadata?.htmlBlock || "";
+  const { formatMailMetadataHtml } = require("./mailMetadata");
+  const metaHtml = formatMailMetadataHtml(mailMetadata) || "";
 
   const openButton = openUrl
     ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`

@@ -299,11 +299,55 @@ export function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
   return {
     message: null,
     file: {
-      filename: filename || "document.pdf",
-      mimeType: encryptedPackage.mimeType || "application/pdf",
+      filename: filename || "document.bin",
+      mimeType: encryptedPackage.mimeType || "application/octet-stream",
       bytes: decryptedBytes,
     },
   };
+}
+
+function fileExtensionOf(fileName) {
+  const base = String(fileName || "").split(/[\\/]/).pop() || "";
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  return base
+    .slice(dot + 1)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+/** Encrypted attachment extension by original type (image → secureimage, pdf → securepdf). */
+export function secureExtensionForFile(fileName, mimeType, kind = "file") {
+  if (kind === "message" || kind === "bundle") return "securemsg";
+
+  const ext = fileExtensionOf(fileName);
+  const mime = String(mimeType || "").toLowerCase();
+
+  if (
+    mime.startsWith("image/") ||
+    /^(jpe?g|png|gif|webp|bmp|svg|tiff?|heic|ico|avif)$/i.test(ext)
+  ) {
+    return "secureimage";
+  }
+  if (mime === "application/pdf" || ext === "pdf") return "securepdf";
+  if (
+    mime.startsWith("video/") ||
+    /^(mp4|mov|avi|mkv|webm|m4v|wmv|flv)$/i.test(ext)
+  ) {
+    return "securevideo";
+  }
+  if (
+    mime.startsWith("audio/") ||
+    /^(mp3|wav|aac|m4a|flac|ogg|wma)$/i.test(ext)
+  ) {
+    return "secureaudio";
+  }
+  if (ext && /^[a-z0-9]{1,12}$/i.test(ext)) return `secure${ext}`;
+  return "securefile";
+}
+
+export function isSecureEncryptedFileName(fileName) {
+  return /\.secure[a-z0-9]+$/i.test(String(fileName || ""));
 }
 
 export async function buildEncryptedPackage({
@@ -338,7 +382,7 @@ export async function buildEncryptedPackage({
     wrappedKey: wrappedKey || null,
   };
 
-  const ext = kind === "file" ? "securepdf" : "securemsg";
+  const ext = secureExtensionForFile(safeFileName, mimeType, kind);
   const result = {
     fileName: `${encryptedName}.${ext}`,
     text: JSON.stringify(payload, null, 2),

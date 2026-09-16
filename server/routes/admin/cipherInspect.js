@@ -313,6 +313,7 @@ router.post(
           emailEnc: parsed.emailEnc,
           uuidEnc: parsed.uuidEnc,
           messageUuidHash: parsed.messageUuidHash || null,
+          mismatchNotice: parsed.mismatchNotice || null,
           email: parsed.email,
           uuid: parsed.uuid,
           emailHash: parsed.email ? hashEmail(parsed.email) : null,

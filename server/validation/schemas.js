@@ -110,10 +110,9 @@ const sendFileSchema = z.object({
     .refine(
       (name) => {
         if (!name) return true;
-        const lower = name.toLowerCase();
-        return lower.endsWith(".securepdf") || lower.endsWith(".securemsg");
+        return /\.secure[a-z0-9]+$/i.test(String(name));
       },
-      "Encrypted package must be a .securepdf or .securemsg file",
+      "Encrypted package must be a .secure* file (e.g. .securepdf, .secureimage)",
     ),
   gmailAccessToken: z.string().min(20).optional(),
   clientSend: z.boolean().optional().default(true),
@@ -169,23 +168,9 @@ const encryptFileSchema = z
     if (!hasMessage && !hasFile) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Add a message or a PDF (or both)",
+        message: "Add a message or a file (or both)",
         path: ["message"],
       });
-    }
-    if (hasFile && data.fileName) {
-      const lower = data.fileName.toLowerCase();
-      if (
-        !lower.endsWith(".pdf") &&
-        data.mimeType &&
-        data.mimeType !== "application/pdf"
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Only PDF files are allowed",
-          path: ["fileName"],
-        });
-      }
     }
   });
 
@@ -241,7 +226,7 @@ const smartSendSchema = z
     if (!hasMessage && !hasFile) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Add a message or a PDF (or both)",
+        message: "Add a message or a file (or both)",
         path: ["message"],
       });
     }
@@ -314,6 +299,13 @@ const systemSettingsUpdateSchema = z.object({
   tokenExpiryHours: z.number().min(0.25).max(168).optional(),
   checkInIntervalHours: z.number().min(0.25).max(168).optional(),
   keyRotationRemindDays: z.number().int().min(1).max(730).optional(),
+  /** Extensions blocked from encrypt (comma string or array). e.g. vbs,exe */
+  blockedFileExtensions: z
+    .union([
+      z.array(z.string().trim().max(20)),
+      z.string().trim().max(500),
+    ])
+    .optional(),
 });
 
 const acceptInviteSchema = z.object({

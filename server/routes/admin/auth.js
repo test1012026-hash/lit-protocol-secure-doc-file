@@ -618,6 +618,9 @@ router.get("/me", adminAuthMiddleware, async (req, res) => {
         tokenExpiryHours: settings.tokenExpiryHours,
         checkInIntervalHours: settings.checkInIntervalHours,
         keyRotationRemindDays: settings.keyRotationRemindDays,
+        blockedFileExtensions: Array.isArray(settings.blockedFileExtensions)
+          ? settings.blockedFileExtensions
+          : [],
       },
       session: {
         createdAt: req.user.createdAt || null,

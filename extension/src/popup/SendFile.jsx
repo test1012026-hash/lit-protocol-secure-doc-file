@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { API_BASE_URL } from "../lib/config";
 import {
   isEmptyRichText,
   parseOrThrow,
@@ -59,7 +60,7 @@ export default function SendFile({ auth }) {
     if (hasFile) {
       payload.fileBase64 = await fileToBase64(values.file);
       payload.fileName = values.file.name;
-      payload.mimeType = values.file.type || "application/pdf";
+      payload.mimeType = values.file.type || "application/octet-stream";
     }
 
     const { data: encrypted } = await api.encryptFile(payload, auth.token);
@@ -119,9 +120,38 @@ export default function SendFile({ auth }) {
 
       if (values.file instanceof File && values.file.size > 15 * 1024 * 1024) {
         setStatus(
-          "Error: PDF should be under ~15 MB before encryption so the Gmail message stays within limits (max PDF 20 MB).",
+          "Error: File should be under ~15 MB before encryption so the Gmail message stays within limits (max 20 MB).",
         );
         return;
+      }
+
+      if (values.file instanceof File) {
+        try {
+          const policyRes = await fetch(
+            `${String(API_BASE_URL).replace(/\/$/, "")}/public/file-policy`,
+          );
+          const policy = await policyRes.json().catch(() => ({}));
+          const blocked = Array.isArray(policy.blockedFileExtensions)
+            ? policy.blockedFileExtensions
+            : [];
+          const name = String(values.file.name || "");
+          const dot = name.lastIndexOf(".");
+          const ext =
+            dot > 0
+              ? name
+                  .slice(dot + 1)
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]/g, "")
+              : "";
+          if (ext && blocked.includes(ext)) {
+            setStatus(
+              `Error: .${ext} files are blocked by admin and cannot be encrypted.`,
+            );
+            return;
+          }
+        } catch {
+          // Server will enforce on encrypt if policy fetch fails.
+        }
       }
 
       setLoading(true);
@@ -216,7 +246,6 @@ export default function SendFile({ auth }) {
         ref={fileInputRef}
         className="field"
         type="file"
-        accept="application/pdf,.pdf"
         onChange={(e) => setFile(e.target.files[0] || null)}
       />
       <button

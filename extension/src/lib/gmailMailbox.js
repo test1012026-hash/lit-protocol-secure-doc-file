@@ -76,8 +76,7 @@ function walkParts(part, acc = { texts: [], htmls: [], attachments: [] }) {
 function isSecureAttachmentName(name) {
   const n = String(name || "").toLowerCase();
   return (
-    n.endsWith(".securepdf") ||
-    n.endsWith(".securemsg") ||
+    /\.secure[a-z0-9]+$/i.test(n) ||
     n.endsWith(".sdsb") ||
     n.includes("secure-package")
   );

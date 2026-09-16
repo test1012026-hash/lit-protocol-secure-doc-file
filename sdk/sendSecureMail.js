@@ -223,8 +223,8 @@ async function encryptOnly(options = {}) {
       ...(filePayload
         ? {
             fileBase64: filePayload,
-            fileName: fileName || "document.pdf",
-            mimeType: mimeType || "application/pdf",
+            fileName: fileName || "document.bin",
+            mimeType: mimeType || "application/octet-stream",
           }
         : {}),
     },

@@ -26,6 +26,10 @@ const {
   parseDecryptedContent,
 } = require("../lib/secureCrypto");
 const { assertCanReceiveEncryptedMail, assertCanDecrypt } = require("../lib/recipientAccess");
+const {
+  assertEncryptFileAllowed,
+  getBlockedFileExtensions,
+} = require("../lib/filePolicy");
 
 const router = express.Router();
 
@@ -128,6 +132,26 @@ router.get("/subscription-check", async (req, res) => {
 });
 
 /**
+ * GET /api/public/file-policy
+ * Blocked file extensions configured by super admin (no auth).
+ */
+router.get("/file-policy", async (req, res) => {
+  try {
+    const blockedFileExtensions = await getBlockedFileExtensions();
+    return res.json({
+      ok: true,
+      blockedFileExtensions,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "file-policy failed",
+      code: "FILE_POLICY_FAILED",
+    });
+  }
+});
+
+/**
  * POST /api/public/encrypt
  * Open for all — no JWT / no auth.
  *
@@ -148,8 +172,8 @@ router.post("/encrypt", async (req, res) => {
     const to = normalizeEmail(body.to || body.receiverEmail || body.email);
     const message = body.message || "";
     const fileBase64 = body.fileBase64 || body.fileContent || null;
-    const fileName = body.fileName || "document.pdf";
-    const mimeType = body.mimeType || "application/pdf";
+    const fileName = body.fileName || "document.bin";
+    const mimeType = body.mimeType || "application/octet-stream";
     const subject = body.subject || "";
 
     if (!to || !to.includes("@")) {
@@ -168,6 +192,19 @@ router.post("/encrypt", async (req, res) => {
         code: "CONTENT_REQUIRED",
         error: "Add a message or a file (base64), or both",
       });
+    }
+
+    if (hasFile) {
+      const fileCheck = await assertEncryptFileAllowed(fileName);
+      if (!fileCheck.ok) {
+        return res.status(400).json({
+          ok: false,
+          code: fileCheck.code || "FILE_EXTENSION_BLOCKED",
+          error: fileCheck.error,
+          extension: fileCheck.extension || null,
+          blockedFileExtensions: fileCheck.blockedExtensions || [],
+        });
+      }
     }
 
     if (hasFile && String(fileBase64).length > 35_000_000) {
@@ -203,7 +240,7 @@ router.post("/encrypt", async (req, res) => {
 
     const subjectText =
       subject ||
-      (hasFile ? fileName || "document.pdf" : "Secure message");
+      (hasFile ? fileName || "Secure file" : "Secure message");
 
     const {
       messageCipherText,
@@ -254,6 +291,8 @@ router.post("/encrypt", async (req, res) => {
             emailEnc: mailMetadata.emailEnc,
             uuidEnc: mailMetadata.uuidEnc,
             messageUuidHash: mailMetadata.messageUuidHash,
+            hashMismatch: Boolean(mailMetadata.hashMismatch),
+            mismatchNotice: mailMetadata.mismatchNotice || null,
           }
         : null,
       attachment: encryptedPackage
@@ -305,6 +344,8 @@ router.post("/mail-metadata", async (req, res) => {
         emailEnc: mailMetadata.emailEnc,
         uuidEnc: mailMetadata.uuidEnc,
         messageUuidHash: mailMetadata.messageUuidHash,
+        hashMismatch: Boolean(mailMetadata.hashMismatch),
+        mismatchNotice: mailMetadata.mismatchNotice || null,
       },
       token: mailMetadata.token,
       textBlock: mailMetadata.textBlock,
@@ -312,6 +353,8 @@ router.post("/mail-metadata", async (req, res) => {
       emailEnc: mailMetadata.emailEnc,
       uuidEnc: mailMetadata.uuidEnc,
       messageUuidHash: mailMetadata.messageUuidHash,
+      hashMismatch: Boolean(mailMetadata.hashMismatch),
+      mismatchNotice: mailMetadata.mismatchNotice || null,
     });
   } catch (err) {
     console.error("[public/mail-metadata]", err);

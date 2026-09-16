@@ -663,7 +663,7 @@ export default function ReceiveFile({ auth }) {
           <input
             className="field"
             type="file"
-            accept=".securepdf,.securemsg,application/json,text/plain"
+            accept=".securepdf,.secureimage,.securevideo,.secureaudio,.securemsg,.securefile,.securexlsx,.securedocx,application/json,text/plain"
             onChange={(e) => setEncryptedFile(e.target.files?.[0] || null)}
           />
           <button

@@ -24,69 +24,100 @@ function escapeHtml(s) {
 }
 
 /**
+ * Plain-mail Metadata HTML (full-width line + title + listed fields).
+ * Never uses tables so Outlook/Gmail do not shrink the block.
+ */
+function formatMailMetadataHtml(meta) {
+  const m = meta || {};
+  const token = String(m.token || "").trim();
+  const emailEnc = String(m.emailEnc || "").trim();
+  const uuidEnc = String(m.uuidEnc || "").trim();
+  const notice = String(m.mismatchNotice || "").trim();
+  if (!token && !emailEnc && !uuidEnc) return "";
+
+  return [
+    '<div style="margin:16px 0 0 0;padding:12px 0 0 0;border-top:2px solid #0F766E;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">',
+    '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:700;color:#0F766E;margin:0 0 8px 0">Metadata</div>',
+    notice
+      ? `<div style="margin:0 0 8px 0;color:#B91C1C;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700">${escapeHtml(notice)}</div>`
+      : "",
+    token
+      ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0 0 4px 0;word-break:break-all">${escapeHtml(token)}</div>`
+      : "",
+    emailEnc
+      ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0 0 4px 0;word-break:break-all">email: ${escapeHtml(emailEnc)}</div>`
+      : "",
+    uuidEnc
+      ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0;word-break:break-all">uuid: ${escapeHtml(uuidEnc)}</div>`
+      : "",
+    "</div>",
+  ].join("");
+}
+
+/**
  * Build metadata for the mail recipient (locked-to user).
  * @returns {{ token, emailEnc, uuidEnc, messageUuidHash, textBlock, htmlBlock }}
  */
 function buildMailMetadata({ email, uuid, messageUuidHash = null }) {
   const plainUuid = String(uuid || "").trim();
+  const plainEmail = String(email || "").trim();
   const bindHash = plainUuid ? sha256Hex(plainUuid) : "";
   const incomingHash = String(messageUuidHash || "").trim().toLowerCase();
   const hashMismatch = Boolean(incomingHash && incomingHash !== bindHash);
+  const mismatchNotice = hashMismatch
+    ? `This mail is shown by this email ${plainEmail || "(unknown)"}`
+    : "";
 
-  const emailEnc = encryptEmail(email);
+  const emailEnc = encryptEmail(plainEmail);
   const uuidEnc = encryptUuid(plainUuid);
   if (!emailEnc || !uuidEnc) {
     throw new Error("email and uuid are required for mail metadata");
   }
-  const payload = JSON.stringify({ e: emailEnc, u: uuidEnc, h: bindHash, v: 1 });
+  const payload = JSON.stringify({
+    e: emailEnc,
+    u: uuidEnc,
+    h: bindHash,
+    v: 1,
+    ...(hashMismatch
+      ? { fallback: true, notice: mismatchNotice }
+      : {}),
+  });
   const token =
     META_TOKEN_PREFIX + Buffer.from(payload, "utf8").toString("base64url");
 
   const textBlock = [
     "",
     "",
-    "",
+    "Metadata",
     token,
     "email: " + emailEnc,
     "uuid: " + uuidEnc,
-    "bind: " + bindHash,
-    hashMismatch ? "bindSource: message_uuid_fallback" : "",
+    hashMismatch ? "error: " + mismatchNotice : "",
     "",
-  ].join("\n");
+  ]
+    .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
+    .join("\n");
 
-  // Visually separate from message body — titled "Metadata"
-  const htmlBlock = `
-<br><br>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:20px 0 8px;border-collapse:collapse;clear:both">
-  <tr>
-    <td style="border:2px solid #0f766e;background:#f0fdfa;padding:0;font-family:Arial,Helvetica,sans-serif">
-      <div style="background:#0f766e;color:#ffffff;font-size:13px;font-weight:700;letter-spacing:0.04em;padding:8px 12px">
-        Metadata
-      </div>
-      <div style="padding:12px">
-        <div style="word-break:break-all;font-family:Consolas,monospace;font-size:11px;color:#134e4a;background:#ffffff;border:1px solid #99f6e4;padding:10px">
-          ${escapeHtml(token)}
-        </div>
-        <div style="margin-top:10px;word-break:break-all;font-family:Consolas,monospace;font-size:10px;color:#475569">
-          <div><b>email:</b> ${escapeHtml(emailEnc)}</div>
-          <div style="margin-top:4px"><b>uuid:</b> ${escapeHtml(uuidEnc)}</div>
-          <div style="margin-top:4px"><b>bind:</b> ${escapeHtml(bindHash)}</div>
-          ${
-            hashMismatch
-              ? '<div style="margin-top:4px"><b>bindSource:</b> message_uuid_fallback</div>'
-              : ""
-          }
-        </div>
-        <p style="margin:10px 0 0;font-size:11px;color:#64748b">
-          Separate from the message body — support / admin identity only. Not required to decrypt.
-        </p>
-      </div>
-    </td>
-  </tr>
-</table>
-`.trim();
+  // Plain mail style: full-width line, then Metadata title + listed fields (no table, no bind).
+  const htmlBlock =
+    "<br><br>" +
+    formatMailMetadataHtml({
+      token,
+      emailEnc,
+      uuidEnc,
+      mismatchNotice: mismatchNotice || null,
+    });
 
-  return { token, emailEnc, uuidEnc, messageUuidHash: bindHash, textBlock, htmlBlock };
+  return {
+    token,
+    emailEnc,
+    uuidEnc,
+    messageUuidHash: bindHash,
+    hashMismatch,
+    mismatchNotice: mismatchNotice || null,
+    textBlock,
+    htmlBlock,
+  };
 }
 
 function extractMetaToken(raw) {
@@ -140,6 +171,17 @@ function parseMailMetadata(raw) {
     if (hm) messageUuidHash = hm[1].toLowerCase();
   }
 
+  let mismatchNotice = null;
+  const nm = /(?:^|\n)\s*error:\s*(This mail is shown by this email .+)/i.exec(
+    input,
+  );
+  if (nm) mismatchNotice = nm[1].trim();
+  if (!mismatchNotice) {
+    const nm2 =
+      /This mail is shown by this email\s+\S+/i.exec(input);
+    if (nm2) mismatchNotice = nm2[0].trim();
+  }
+
   // Allow pasting raw enc:v1 / uid:v1 lines only.
   if (!emailEnc && isEncryptedEmail(input)) emailEnc = input;
   if (!uuidEnc && isEncryptedUuid(input)) uuidEnc = input;
@@ -178,6 +220,7 @@ function parseMailMetadata(raw) {
     messageUuidHash,
     email,
     uuid,
+    mismatchNotice,
     error: errors.length ? errors.join("; ") : null,
   };
 }
@@ -187,4 +230,5 @@ module.exports = {
   buildMailMetadata,
   parseMailMetadata,
   extractMetaToken,
+  formatMailMetadataHtml,
 };

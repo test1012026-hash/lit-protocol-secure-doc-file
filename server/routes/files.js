@@ -39,6 +39,7 @@ const {
   assertCanEncryptOrSend,
   assertCanDecrypt,
 } = require("../lib/accountAccess");
+const { assertEncryptFileAllowed } = require("../lib/filePolicy");
 
 const router = express.Router();
 
@@ -179,6 +180,22 @@ router.post(
       assertCanReceiveEncryptedMail(recipient);
       const { iron } = await ensureKeysOnUser(recipient);
 
+      const hasFile = Boolean(fileBase64);
+      const resolvedFileName = hasFile
+        ? fileName || "document.bin"
+        : null;
+      if (hasFile) {
+        const fileCheck = await assertEncryptFileAllowed(resolvedFileName);
+        if (!fileCheck.ok) {
+          return res.status(400).json({
+            error: fileCheck.error,
+            code: fileCheck.code || "FILE_EXTENSION_BLOCKED",
+            extension: fileCheck.extension || null,
+            blockedFileExtensions: fileCheck.blockedExtensions || [],
+          });
+        }
+      }
+
       const {
         messageCipherText,
         fileCipherText,
@@ -190,13 +207,12 @@ router.post(
         iron,
         message: message || "",
         fileBase64: fileBase64 || null,
-        fileName: fileName || "document.pdf",
-        mimeType: mimeType || "application/pdf",
+        fileName: resolvedFileName || "document.bin",
+        mimeType: mimeType || "application/octet-stream",
       });
 
-      const hasFile = Boolean(fileBase64);
       const subjectText =
-        subject || (hasFile ? fileName || "document.pdf" : "Secure message");
+        subject || (hasFile ? resolvedFileName || "Secure file" : "Secure message");
 
       let mailMetadata = null;
       try {
@@ -217,7 +233,7 @@ router.post(
         contentKind,
         messageCipherText: messageCipherText || null,
         fileCipherText: fileCipherText || null,
-        filename: hasFile ? fileName || "document.pdf" : "message.txt",
+        filename: hasFile ? resolvedFileName || "document.bin" : "message.txt",
         mailMetadata: mailMetadata
           ? {
               token: mailMetadata.token,
@@ -226,6 +242,8 @@ router.post(
               emailEnc: mailMetadata.emailEnc,
               uuidEnc: mailMetadata.uuidEnc,
               messageUuidHash: mailMetadata.messageUuidHash,
+              hashMismatch: Boolean(mailMetadata.hashMismatch),
+              mismatchNotice: mailMetadata.mismatchNotice || null,
             }
           : null,
         attachment: encryptedPackage
@@ -319,9 +337,23 @@ router.post("/encrypt-only", validateBody(smartSendSchema), async (req, res) => 
 
     const recipient = await ensureRecipientByEmail(to);
     assertCanReceiveEncryptedMail(recipient);
+    const hasFile = Boolean(fileBase64);
+    const resolvedFileName = hasFile ? fileName || "document.bin" : null;
+    if (hasFile) {
+      const fileCheck = await assertEncryptFileAllowed(resolvedFileName);
+      if (!fileCheck.ok) {
+        return res.status(400).json({
+          ok: false,
+          code: fileCheck.code || "FILE_EXTENSION_BLOCKED",
+          error: fileCheck.error,
+          extension: fileCheck.extension || null,
+          blockedFileExtensions: fileCheck.blockedExtensions || [],
+        });
+      }
+    }
     const subjectText =
       subject ||
-      (Boolean(fileBase64) ? fileName || "document.pdf" : "Secure message");
+      (hasFile ? resolvedFileName || "Secure file" : "Secure message");
 
     const { iron } = await ensureKeysOnUser(recipient);
     const {
@@ -335,8 +367,8 @@ router.post("/encrypt-only", validateBody(smartSendSchema), async (req, res) => 
       iron,
       message: message || "",
       fileBase64: fileBase64 || null,
-      fileName: fileName || "document.pdf",
-      mimeType: mimeType || "application/pdf",
+      fileName: resolvedFileName || "document.bin",
+      mimeType: mimeType || "application/octet-stream",
     });
 
     return res.json({
@@ -390,8 +422,22 @@ router.post("/smart-send", validateBody(smartSendSchema), async (req, res) => {
     }
 
     const hasFile = Boolean(fileBase64);
+    const resolvedFileName = hasFile ? fileName || "document.bin" : null;
     const subjectText =
-      subject || (hasFile ? fileName || "document.pdf" : "Message");
+      subject || (hasFile ? resolvedFileName || "document.bin" : "Message");
+
+    if (hasFile) {
+      const fileCheck = await assertEncryptFileAllowed(resolvedFileName);
+      if (!fileCheck.ok) {
+        return res.status(400).json({
+          ok: false,
+          code: fileCheck.code || "FILE_EXTENSION_BLOCKED",
+          error: fileCheck.error,
+          extension: fileCheck.extension || null,
+          blockedFileExtensions: fileCheck.blockedExtensions || [],
+        });
+      }
+    }
 
     const subscriber = await findUserByEmail(User, to);
     let shouldEncrypt = false;
@@ -415,8 +461,8 @@ router.post("/smart-send", validateBody(smartSendSchema), async (req, res) => {
           subject: subjectText,
           message: message || "",
           fileBase64: fileBase64 || null,
-          fileName: fileName || "document.pdf",
-          mimeType: mimeType || "application/pdf",
+          fileName: resolvedFileName || "document.bin",
+          mimeType: mimeType || "application/octet-stream",
         });
       } catch (mailErr) {
         return res.status(502).json({
@@ -456,8 +502,8 @@ router.post("/smart-send", validateBody(smartSendSchema), async (req, res) => {
         iron,
         message: message || "",
         fileBase64: fileBase64 || null,
-        fileName: fileName || "document.pdf",
-        mimeType: mimeType || "application/pdf",
+        fileName: resolvedFileName || "document.bin",
+        mimeType: mimeType || "application/octet-stream",
       });
 
     const attachmentBase64 =
@@ -575,6 +621,21 @@ router.post(
       assertCanReceiveEncryptedMail(recipient);
       const { iron, created: keysCreated } = await ensureKeysOnUser(recipient);
 
+      const hasFile = Boolean(fileBase64);
+      const resolvedFileName = hasFile ? fileName || "document.bin" : null;
+      if (hasFile) {
+        const fileCheck = await assertEncryptFileAllowed(resolvedFileName);
+        if (!fileCheck.ok) {
+          return res.status(400).json({
+            ok: false,
+            code: fileCheck.code || "FILE_EXTENSION_BLOCKED",
+            error: fileCheck.error,
+            extension: fileCheck.extension || null,
+            blockedFileExtensions: fileCheck.blockedExtensions || [],
+          });
+        }
+      }
+
       const { messageCipherText, contentKind, encryptedPackage } =
         encryptMailPayload({
           recipientUuid: recipient.uuid,
@@ -582,13 +643,12 @@ router.post(
           iron,
           message: message || "",
           fileBase64: fileBase64 || null,
-          fileName: fileName || "document.pdf",
-          mimeType: mimeType || "application/pdf",
+          fileName: resolvedFileName || "document.bin",
+          mimeType: mimeType || "application/octet-stream",
         });
 
-      const hasFile = Boolean(fileBase64);
       const subjectText =
-        subject || (hasFile ? fileName || "document.pdf" : "Secure message");
+        subject || (hasFile ? resolvedFileName || "Secure file" : "Secure message");
       const senderEmail = getPlainEmail(sender);
       const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
 
@@ -741,6 +801,8 @@ router.post(
                 emailEnc: mailMetadata.emailEnc,
                 uuidEnc: mailMetadata.uuidEnc,
                 messageUuidHash: mailMetadata.messageUuidHash,
+                hashMismatch: Boolean(mailMetadata.hashMismatch),
+                mismatchNotice: mailMetadata.mismatchNotice || null,
               }
             : null,
         });

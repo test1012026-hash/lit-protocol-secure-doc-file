@@ -113,8 +113,23 @@ export function buildEmailBodies({
   const openUrl = appUrl
     ? `${String(appUrl).replace(/\/$/, "")}/open-extension`
     : null;
-  const metaText = mailMetadata?.textBlock || "";
-  const metaHtml = mailMetadata?.htmlBlock || "";
+  const meta = mailMetadata || null;
+  const metaText = [
+    meta?.token ? "Metadata" : "",
+    meta?.token || "",
+    meta?.emailEnc ? `email: ${meta.emailEnc}` : "",
+    meta?.uuidEnc ? `uuid: ${meta.uuidEnc}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const metaHtml = meta
+    ? `<div style="margin:16px 0 0 0;padding:12px 0 0 0;border-top:2px solid #0F766E;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">
+  <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:700;color:#0F766E;margin:0 0 8px 0">Metadata</div>
+  ${meta.token ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0 0 4px 0;word-break:break-all">${escapeHtml(meta.token)}</div>` : ""}
+  ${meta.emailEnc ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0 0 4px 0;word-break:break-all">email: ${escapeHtml(meta.emailEnc)}</div>` : ""}
+  ${meta.uuidEnc ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0;word-break:break-all">uuid: ${escapeHtml(meta.uuidEnc)}</div>` : ""}
+</div>`
+    : "";
 
   const openButton = openUrl
     ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`

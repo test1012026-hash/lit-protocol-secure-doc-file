@@ -4,21 +4,27 @@ const { logActivity } = require("../../lib/activityLog");
 const { validateBody } = require("../../middleware/validate");
 const { systemSettingsUpdateSchema } = require("../../validation/schemas");
 const { requireRoles } = require("../../middleware/adminAuth");
+const { normalizeExtensionList } = require("../../lib/filePolicy");
 
 const router = express.Router();
+
+function settingsPayload(settings) {
+  return {
+    tokenExpiryHours: settings.tokenExpiryHours,
+    checkInIntervalHours: settings.checkInIntervalHours,
+    keyRotationRemindDays: settings.keyRotationRemindDays,
+    blockedFileExtensions: normalizeExtensionList(
+      settings.blockedFileExtensions || [],
+    ),
+    updatedAt: settings.updatedAt,
+    updatedByUuid: settings.updatedByUuid,
+  };
+}
 
 router.get("/", async (req, res) => {
   try {
     const settings = await SystemSettings.getOrCreate();
-    return res.json({
-      settings: {
-        tokenExpiryHours: settings.tokenExpiryHours,
-        checkInIntervalHours: settings.checkInIntervalHours,
-        keyRotationRemindDays: settings.keyRotationRemindDays,
-        updatedAt: settings.updatedAt,
-        updatedByUuid: settings.updatedByUuid,
-      },
-    });
+    return res.json({ settings: settingsPayload(settings) });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -39,6 +45,11 @@ router.patch(
       ]) {
         if (req.body[key] !== undefined) settings[key] = req.body[key];
       }
+      if (req.body.blockedFileExtensions !== undefined) {
+        settings.blockedFileExtensions = normalizeExtensionList(
+          req.body.blockedFileExtensions,
+        );
+      }
       settings.updatedAt = new Date();
       settings.updatedByUuid = req.admin.uuid;
       await settings.save();
@@ -49,18 +60,14 @@ router.patch(
         action: "admin.settings_update",
         targetType: "settings",
         targetId: "platform",
-        meta: req.body,
+        meta: {
+          ...req.body,
+          blockedFileExtensions: settings.blockedFileExtensions,
+        },
         ip: req.ip,
       });
 
-      return res.json({
-        settings: {
-          tokenExpiryHours: settings.tokenExpiryHours,
-          checkInIntervalHours: settings.checkInIntervalHours,
-          keyRotationRemindDays: settings.keyRotationRemindDays,
-          updatedAt: settings.updatedAt,
-        },
-      });
+      return res.json({ settings: settingsPayload(settings) });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }

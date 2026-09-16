@@ -479,7 +479,23 @@ function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
     ? decryptedBytes
     : Buffer.from(decryptedBytes);
 
-  // Raw PDF packages (new fast path) — never UTF-8 the whole buffer.
+  // Raw binary file packages (pdf/image/etc.) — never UTF-8 the whole buffer.
+  if (
+    kind === "file" &&
+    mimeType &&
+    mimeType !== "application/json" &&
+    !mimeType.startsWith("text/")
+  ) {
+    return {
+      message: null,
+      file: {
+        filename: filename || "document.bin",
+        mimeType: mimeType || "application/octet-stream",
+        dataBase64: bytesToBase64(buf),
+      },
+    };
+  }
+
   if (
     mimeType === "application/pdf" ||
     filename.toLowerCase().endsWith(".pdf")
@@ -548,8 +564,8 @@ function parseDecryptedContent(decryptedBytes, encryptedPackage = {}) {
   return {
     message: null,
     file: {
-      filename: filename || "document.pdf",
-      mimeType: encryptedPackage.mimeType || "application/pdf",
+      filename: filename || "document.bin",
+      mimeType: encryptedPackage.mimeType || "application/octet-stream",
       dataBase64: bytesToBase64(buf),
     },
   };
@@ -562,9 +578,102 @@ function encryptedFileStem(baseName, recipientUuid, kind) {
       .trim() || "secure-package";
   const uuid = String(recipientUuid || "").trim();
   if (kind !== "file" || !uuid) return stem;
-  const suffix = `-${uuid}`;
-  if (stem.endsWith(suffix) || stem.endsWith(uuid)) return stem;
+  // Two dashes before recipient UUID: name--{uuid}.secure*
+  const suffix = `--${uuid}`;
+  const legacySuffix = `-${uuid}`;
+  if (
+    stem.endsWith(suffix) ||
+    stem.endsWith(legacySuffix) ||
+    stem.endsWith(uuid)
+  ) {
+    // Normalize legacy single-dash suffix to --uuid
+    if (stem.endsWith(legacySuffix) && !stem.endsWith(suffix)) {
+      return stem.slice(0, -legacySuffix.length) + suffix;
+    }
+    return stem;
+  }
   return `${stem}${suffix}`;
+}
+
+function fileExtensionOf(fileName) {
+  const base = String(fileName || "").split(/[\\/]/).pop() || "";
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  return base
+    .slice(dot + 1)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Encrypted attachment extension by original type.
+ * e.g. photo.png → secureimage, report.pdf → securepdf, notes.docx → securedocx
+ */
+function secureExtensionForFile(fileName, mimeType, kind = "file") {
+  if (kind === "message" || kind === "bundle") return "securemsg";
+
+  const ext = fileExtensionOf(fileName);
+  const mime = String(mimeType || "").toLowerCase();
+
+  if (
+    mime.startsWith("image/") ||
+    /^(jpe?g|png|gif|webp|bmp|svg|tiff?|heic|ico|avif)$/i.test(ext)
+  ) {
+    return "secureimage";
+  }
+  if (mime === "application/pdf" || ext === "pdf") return "securepdf";
+  if (
+    mime.startsWith("video/") ||
+    /^(mp4|mov|avi|mkv|webm|m4v|wmv|flv)$/i.test(ext)
+  ) {
+    return "securevideo";
+  }
+  if (
+    mime.startsWith("audio/") ||
+    /^(mp3|wav|aac|m4a|flac|ogg|wma)$/i.test(ext)
+  ) {
+    return "secureaudio";
+  }
+  if (/^(docx?|odt|rtf)$/i.test(ext) || /wordprocessingml|msword/i.test(mime)) {
+    return ext === "doc" ? "securedoc" : ext === "odt" ? "secureodt" : "securedocx";
+  }
+  if (
+    /^(xlsx?|ods|csv)$/i.test(ext) ||
+    /spreadsheetml|ms-excel|csv/i.test(mime)
+  ) {
+    if (ext === "csv" || mime.includes("csv")) return "securecsv";
+    if (ext === "xls") return "securexls";
+    if (ext === "ods") return "secureods";
+    return "securexlsx";
+  }
+  if (
+    /^(pptx?|odp)$/i.test(ext) ||
+    /presentationml|ms-powerpoint/i.test(mime)
+  ) {
+    if (ext === "ppt") return "secureppt";
+    if (ext === "odp") return "secureodp";
+    return "securepptx";
+  }
+  if (
+    mime.startsWith("text/") ||
+    /^(txt|md|log|json|xml|html?|css|js|ts)$/i.test(ext)
+  ) {
+    return ext && /^[a-z0-9]{1,8}$/i.test(ext)
+      ? `secure${ext}`
+      : "securetext";
+  }
+  if (/^(zip|rar|7z|tar|gz)$/i.test(ext) || /zip|x-rar|x-7z|gzip|tar/i.test(mime)) {
+    return ext && /^[a-z0-9]{1,8}$/i.test(ext)
+      ? `secure${ext}`
+      : "securearchive";
+  }
+
+  if (ext && /^[a-z0-9]{1,12}$/i.test(ext)) return `secure${ext}`;
+  return "securefile";
+}
+
+function isSecureEncryptedFileName(fileName) {
+  return /\.secure[a-z0-9]+$/i.test(String(fileName || ""));
 }
 
 function buildEncryptedPackage({
@@ -608,7 +717,7 @@ function buildEncryptedPackage({
     wrappedKey: wrappedKey || null,
   };
 
-  const ext = kind === "file" ? "securepdf" : "securemsg";
+  const ext = secureExtensionForFile(safeFileName, mimeType, kind);
 
   // File packages: only build SDSB binary. Skipping text/base64/cipherText
   // avoids multi-copy of multi‑MB ciphertext (was the 3–4 min bottleneck).
@@ -828,8 +937,8 @@ function encryptMailPayload({
       ...encryptedFile,
       recipientUuid,
       expectedEmail: recipientEmail,
-      filename: fileName || `${packageName}.pdf`,
-      mimeType: mimeType || "application/pdf",
+      filename: fileName || `${packageName}.bin`,
+      mimeType: mimeType || "application/octet-stream",
       kind: "file",
     });
     // File packages are SDSB binary (base64); never reuse the message sds. token.
@@ -841,7 +950,7 @@ function encryptMailPayload({
   console.log(
     `[encryptMailPayload] ${contentKind} in ${Date.now() - t0}ms` +
       (hasFile
-        ? ` (pdf≈${Math.round((fileBase64.length * 0.75) / 1024 / 1024)}MB)`
+        ? ` (file≈${Math.round((fileBase64.length * 0.75) / 1024 / 1024)}MB)`
         : ""),
   );
 
@@ -867,4 +976,7 @@ module.exports = {
   extractSdsCiphertext,
   toCipherText,
   stripHtmlToText,
+  secureExtensionForFile,
+  isSecureEncryptedFileName,
+  fileExtensionOf,
 };
