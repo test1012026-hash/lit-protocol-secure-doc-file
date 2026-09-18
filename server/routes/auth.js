@@ -932,6 +932,26 @@ function isWorkspaceGoogleReturnOrigin_(origin) {
   }
 }
 
+/**
+ * Build post-login redirect. Critical: never use `new URL('/…', appsScriptExecUrl)`
+ * — an absolute path replaces `/macros/s/…/exec` and lands on script.google.com/home.
+ */
+function buildWorkspaceOAuthReturnUrl_(returnOrigin, returnPath, ticket) {
+  const origin = String(returnOrigin || "").replace(/\/$/, "");
+  const path = String(returnPath || "/api/auth/oauth/popup-done");
+  const token = String(ticket || "");
+
+  if (/script\.google\.com\/macros\//i.test(origin)) {
+    const u = new URL(origin);
+    u.searchParams.set("oauth_ticket", token);
+    return u.toString();
+  }
+
+  const dest = new URL(path.startsWith("/") ? path : `/${path}`, `${origin}/`);
+  dest.searchParams.set("oauth_ticket", token);
+  return dest.toString();
+}
+
 function googleOAuthFailPage(res, title, message) {
   return res.status(400).send(
     `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
@@ -1074,16 +1094,17 @@ async function handleGoogleOAuthCallback(req, res) {
     const returnPath = String(wsState.path || "/api/auth/oauth/popup-done");
     // Workspace web app runs on script.google.com; Outlook origins stay on the allow-list.
     if (!isWorkspaceGoogleReturnOrigin_(returnOrigin)) {
-      const dest = new URL("/api/auth/oauth/popup-done", `${appUrl()}/`);
-      dest.searchParams.set("oauth_ticket", ticket);
-      return res.redirect(dest.toString());
+      return res.redirect(
+        buildWorkspaceOAuthReturnUrl_(
+          appUrl(),
+          "/api/auth/oauth/popup-done",
+          ticket,
+        ),
+      );
     }
-    const dest = new URL(
-      returnPath.startsWith("/") ? returnPath : `/${returnPath}`,
-      `${returnOrigin}/`,
+    return res.redirect(
+      buildWorkspaceOAuthReturnUrl_(returnOrigin, returnPath, ticket),
     );
-    dest.searchParams.set("oauth_ticket", ticket);
-    return res.redirect(dest.toString());
   } catch (err) {
     console.error("Google OAuth callback error:", err);
     return googleOAuthFailPage(
