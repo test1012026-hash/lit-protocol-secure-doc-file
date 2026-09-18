@@ -18,11 +18,16 @@ const {
 } = require("../lib/emailCrypto");
 const {
   getGmailAuthUrl,
+  getOAuthConfig,
   exchangeCodeForTokens,
   getOAuthClient,
   createConnectState,
   consumeConnectState,
   getGmailAccessTokenFromRefresh,
+  signWorkspaceGoogleState,
+  verifyWorkspaceGoogleState,
+  signWorkspaceConnectTicket,
+  verifyWorkspaceConnectTicket,
 } = require("../lib/gmailAuth");
 const {
   ensureUserSubscription,
@@ -861,24 +866,24 @@ router.get("/gmail/connect", authMiddleware, async (req, res) => {
     const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const state = await createConnectState(user.uuid);
-    const { url, redirectUri, clientId } = getGmailAuthUrl(state);
-    const goUrl = `${appUrl()}/api/auth/gmail/go?state=${encodeURIComponent(state)}`;
-    res.json({ url, goUrl, redirectUri, clientId });
+    // Same /auth/google/callback as Workspace login/signup.
+    const ticket = signWorkspaceConnectTicket(user.uuid);
+    const goUrl = `${appUrl()}/auth/google/start?mode=connect&ticket=${encodeURIComponent(ticket)}`;
+    res.json({ goUrl, url: goUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-/** Browser entry: redirect into Google OAuth (opened from the Gmail add-on). */
+/** Legacy alias → unified Google start (connect). */
 router.get("/gmail/go", async (req, res) => {
+  const state = String(req.query.state || "").trim();
+  if (!state) {
+    return res
+      .status(400)
+      .send("Missing connect state. Return to Gmail and try Encrypt & send again.");
+  }
   try {
-    const state = String(req.query.state || "").trim();
-    if (!state) {
-      return res
-        .status(400)
-        .send("Missing connect state. Return to Gmail and try Encrypt & send again.");
-    }
     const user = await User.findOne({ gmailConnectState: state });
     if (
       !user ||
@@ -891,86 +896,300 @@ router.get("/gmail/go", async (req, res) => {
           "Connect link expired. Return to Gmail, tap Encrypt & send, and allow Gmail again.",
         );
     }
-    const { url } = getGmailAuthUrl(state);
-    return res.redirect(url);
+    const ticket = signWorkspaceConnectTicket(user.uuid);
+    return res.redirect(
+      `${appUrl()}/auth/google/start?mode=connect&ticket=${encodeURIComponent(ticket)}`,
+    );
   } catch (err) {
-    console.error("gmail/go:", err.message);
     return res.status(500).send(err.message || "Could not start Google sign-in.");
   }
 });
 
-async function handleGmailOAuthCallback(req, res) {
-  const fail = (message) =>
-    res.status(400).send(
-      `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
-<h2 style="color:#ff6b7a">Gmail connect failed</h2>
-<p>${message}</p>
-<p>Close this window and try Encrypt & send again.</p>
-</body></html>`,
-    );
+const userOAuth = require("../lib/userOAuth");
 
+/** Allow Workspace Apps Script + configured Outlook/admin return origins. */
+function isWorkspaceGoogleReturnOrigin_(origin) {
+  if (userOAuth.isAllowedReturnOrigin(origin)) return true;
+  try {
+    const host = new URL(String(origin || "")).hostname.toLowerCase();
+    return (
+      host === "script.google.com" ||
+      host.endsWith(".googleusercontent.com") ||
+      host === "localhost" ||
+      host === "127.0.0.1"
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function googleOAuthFailPage(res, title, message) {
+  return res.status(400).send(
+    `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
+<h2 style="color:#ff6b7a">${title}</h2>
+<p>${message}</p>
+<p>Close this window and return to the SecureDocShare Workspace app.</p>
+</body></html>`,
+  );
+}
+
+/**
+ * Unified Google callback for Workspace:
+ * - login / signup (creates session ticket + stores Gmail refresh token)
+ * - connect (Gmail scopes only for an existing logged-in user)
+ * Same redirect URI: /auth/google/callback
+ */
+async function handleGoogleOAuthCallback(req, res) {
   try {
     const { code, state, error, error_description: errorDescription } =
       req.query;
     if (error) {
-      return fail(`${error}${errorDescription ? `: ${errorDescription}` : ""}`);
+      return googleOAuthFailPage(
+        res,
+        "Google sign-in failed",
+        `${error}${errorDescription ? `: ${errorDescription}` : ""}`,
+      );
     }
-    if (!code || !state) return fail("Missing code or state.");
-
-    const uuid = await consumeConnectState(String(state));
-    if (!uuid) {
-      return fail("Connect link expired. Try Connect Gmail again.");
-    }
-
-    // Must match the redirect_uri used in generateAuthUrl (GOOGLE_GMAIL_REDIRECT_URI).
-    const tokens = await exchangeCodeForTokens(String(code));
-    if (!tokens.refresh_token) {
-      return fail(
-        "No refresh token returned. Revoke app access at myaccount.google.com/permissions and try again.",
+    if (!code || !state) {
+      return googleOAuthFailPage(
+        res,
+        "Google sign-in failed",
+        "Missing code or state.",
       );
     }
 
+    let wsState = null;
+    try {
+      wsState = verifyWorkspaceGoogleState(String(state));
+    } catch (_) {
+      wsState = null;
+    }
+
+    // Legacy hex connect-state (older Encrypt & send links).
+    if (!wsState) {
+      return handleLegacyGmailConnectCallback(req, res, String(code), String(state));
+    }
+
+    const tokens = await exchangeCodeForTokens(String(code));
     const oauth2Client = getOAuthClient();
     oauth2Client.setCredentials(tokens);
     const { google } = require("googleapis");
     const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
-    const googleEmail = (await oauth2.userinfo.get()).data.email;
-
-    const user = await User.findOne({ uuid });
-    if (!user) return fail("User not found.");
-
-    if (
-      googleEmail &&
-      normalizeEmail(googleEmail) !== getPlainEmail(user)
-    ) {
-      return fail(
-        `Google account (${googleEmail}) must match your login (${getPlainEmail(user)}).`,
+    const info = (await oauth2.userinfo.get()).data;
+    const googleEmail = info.email;
+    if (!googleEmail) {
+      return googleOAuthFailPage(
+        res,
+        "Google sign-in failed",
+        "Google did not return an email address.",
       );
     }
 
-    user.gmailRefreshToken = tokens.refresh_token;
-    user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
-    if (googleEmail) applyEncryptedEmail(user, googleEmail);
-    await user.save();
+    const mode = wsState.mode === "connect" ? "connect" : "auth";
+    const intent = wsState.intent === "signup" ? "signup" : "login";
+    const acceptTerms = Boolean(wsState.terms);
 
-    res.send(
-      `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
+    if (mode === "connect") {
+      if (!wsState.uuid) {
+        return googleOAuthFailPage(
+          res,
+          "Gmail connect failed",
+          "Missing user on connect state.",
+        );
+      }
+      if (!tokens.refresh_token) {
+        return googleOAuthFailPage(
+          res,
+          "Gmail connect failed",
+          "No refresh token returned. Revoke SecureDocShare at myaccount.google.com/permissions and try again.",
+        );
+      }
+      const user = await User.findOne({ uuid: wsState.uuid, claimed: true });
+      if (!user) {
+        return googleOAuthFailPage(res, "Gmail connect failed", "User not found.");
+      }
+      if (normalizeEmail(googleEmail) !== getPlainEmail(user)) {
+        return googleOAuthFailPage(
+          res,
+          "Gmail connect failed",
+          `Google account (${googleEmail}) must match your login (${getPlainEmail(user)}).`,
+        );
+      }
+      user.gmailRefreshToken = tokens.refresh_token;
+      user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
+      await user.save();
+      return res.send(
+        `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
 <h2 style="color:#2bb3a0">Gmail connected</h2>
 <p>Sends will appear From: <b>${getPlainEmail(user)}</b></p>
-<p>You can close this window and return to Gmail → Encrypt & send.</p>
-<script>setTimeout(function(){try{window.close();}catch(e){}},800);</script>
+<p>Close this window and tap Encrypt & send again.</p>
+<script>setTimeout(function(){try{window.close();}catch(e){}},900);</script>
 </body></html>`,
+      );
+    }
+
+    // Login / signup for Workspace Marketplace app.
+    let user;
+    try {
+      user = await upsertUserFromOAuth(
+        {
+          email: googleEmail,
+          name: info.name || "",
+          subject: info.id || info.sub || "",
+        },
+        {
+          intent,
+          acceptTerms,
+          provider: "google",
+          gmailRefreshToken: tokens.refresh_token || null,
+          gmailScopes: tokens.scope || "",
+        },
+      );
+    } catch (err) {
+      return googleOAuthFailPage(
+        res,
+        intent === "signup" ? "Sign up failed" : "Login failed",
+        err.message || "Could not complete Google sign-in.",
+      );
+    }
+
+    // If Google did not return a new refresh token, keep any existing grant.
+    if (tokens.refresh_token) {
+      user.gmailRefreshToken = tokens.refresh_token;
+      user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
+      await user.save();
+    }
+
+    const ticket = userOAuth.signUserOAuthTicket(user.uuid);
+    const returnOrigin = String(wsState.o || appUrl()).replace(/\/$/, "");
+    const returnPath = String(wsState.path || "/api/auth/oauth/popup-done");
+    // Workspace web app runs on script.google.com; Outlook origins stay on the allow-list.
+    if (!isWorkspaceGoogleReturnOrigin_(returnOrigin)) {
+      const dest = new URL("/api/auth/oauth/popup-done", `${appUrl()}/`);
+      dest.searchParams.set("oauth_ticket", ticket);
+      return res.redirect(dest.toString());
+    }
+    const dest = new URL(
+      returnPath.startsWith("/") ? returnPath : `/${returnPath}`,
+      `${returnOrigin}/`,
     );
+    dest.searchParams.set("oauth_ticket", ticket);
+    return res.redirect(dest.toString());
   } catch (err) {
-    console.error("Gmail callback error:", err);
-    fail(err.message || "Unexpected error");
+    console.error("Google OAuth callback error:", err);
+    return googleOAuthFailPage(
+      res,
+      "Google sign-in failed",
+      err.message || "Unexpected error",
+    );
   }
 }
 
-router.get("/gmail/callback", handleGmailOAuthCallback);
+async function handleLegacyGmailConnectCallback(req, res, code, state) {
+  const uuid = await consumeConnectState(state);
+  if (!uuid) {
+    return googleOAuthFailPage(
+      res,
+      "Gmail connect failed",
+      "Connect link expired. Try Encrypt & send again.",
+    );
+  }
+  const tokens = await exchangeCodeForTokens(code);
+  if (!tokens.refresh_token) {
+    return googleOAuthFailPage(
+      res,
+      "Gmail connect failed",
+      "No refresh token returned. Revoke app access at myaccount.google.com/permissions and try again.",
+    );
+  }
+  const oauth2Client = getOAuthClient();
+  oauth2Client.setCredentials(tokens);
+  const { google } = require("googleapis");
+  const oauth2 = google.oauth2({ version: "v2", auth: oauth2Client });
+  const googleEmail = (await oauth2.userinfo.get()).data.email;
+  const user = await User.findOne({ uuid });
+  if (!user) {
+    return googleOAuthFailPage(res, "Gmail connect failed", "User not found.");
+  }
+  if (googleEmail && normalizeEmail(googleEmail) !== getPlainEmail(user)) {
+    return googleOAuthFailPage(
+      res,
+      "Gmail connect failed",
+      `Google account (${googleEmail}) must match your login (${getPlainEmail(user)}).`,
+    );
+  }
+  user.gmailRefreshToken = tokens.refresh_token;
+  user.gmailScopes = mergeGrantedScopes(user.gmailScopes, tokens.scope);
+  if (googleEmail) applyEncryptedEmail(user, googleEmail);
+  await user.save();
+  return res.send(
+    `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
+<h2 style="color:#2bb3a0">Gmail connected</h2>
+<p>Sends will appear From: <b>${getPlainEmail(user)}</b></p>
+<p>Close this window and tap Encrypt & send again.</p>
+<script>setTimeout(function(){try{window.close();}catch(e){}},900);</script>
+</body></html>`,
+  );
+}
 
-// ─── Outlook / client OAuth (Google, Microsoft, Yahoo) ───────────────────────
-const userOAuth = require("../lib/userOAuth");
+/** Start Workspace Google OAuth (login / signup / connect) → same callback. */
+async function handleGoogleOAuthStart(req, res) {
+  try {
+    const mode =
+      String(req.query.mode || "").toLowerCase() === "connect"
+        ? "connect"
+        : "auth";
+    const intent = req.query.intent === "signup" ? "signup" : "login";
+    const acceptTerms =
+      req.query.acceptTerms === "1" ||
+      req.query.acceptTerms === "true" ||
+      req.query.acceptTerms === true;
+
+    if (mode === "auth" && intent === "signup" && !acceptTerms) {
+      return googleOAuthFailPage(
+        res,
+        "Sign up failed",
+        "You must accept the Terms & Conditions.",
+      );
+    }
+
+    let returnOrigin = String(
+      req.query.returnOrigin || appUrl(),
+    ).replace(/\/$/, "");
+    let returnPath = String(
+      req.query.returnPath || "/api/auth/oauth/popup-done",
+    );
+    if (!returnPath.startsWith("/")) returnPath = `/${returnPath}`;
+
+    const statePayload = {
+      mode,
+      intent,
+      terms: Boolean(acceptTerms),
+      o: returnOrigin,
+      path: returnPath,
+    };
+
+    if (mode === "connect") {
+      const ticket = String(req.query.ticket || "").trim();
+      const payload = verifyWorkspaceConnectTicket(ticket);
+      statePayload.uuid = payload.uuid;
+      statePayload.mode = "connect";
+    }
+
+    const state = signWorkspaceGoogleState(statePayload);
+    const { url } = getGmailAuthUrl(state);
+    return res.redirect(url);
+  } catch (err) {
+    console.error("Google OAuth start error:", err);
+    return googleOAuthFailPage(
+      res,
+      "Google sign-in failed",
+      err.message || "Could not start Google sign-in.",
+    );
+  }
+}
+
+router.get("/gmail/callback", handleGoogleOAuthCallback);
 
 async function upsertUserFromOAuth(
   profile,
@@ -1330,4 +1549,7 @@ router.post("/oauth/complete", async (req, res) => {
 });
 
 module.exports = router;
-module.exports.handleGmailOAuthCallback = handleGmailOAuthCallback;
+module.exports.handleGoogleOAuthCallback = handleGoogleOAuthCallback;
+module.exports.handleGoogleOAuthStart = handleGoogleOAuthStart;
+// Back-compat alias
+module.exports.handleGmailOAuthCallback = handleGoogleOAuthCallback;

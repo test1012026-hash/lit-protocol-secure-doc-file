@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
 const { google } = require("googleapis");
 const User = require("../models/User");
 
@@ -8,19 +9,26 @@ const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
 const USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const USERINFO_PROFILE_SCOPE =
   "https://www.googleapis.com/auth/userinfo.profile";
+const OPENID_SCOPE = "openid";
 const STATE_TTL_MS = 15 * 60 * 1000;
 
+/** Workspace login/signup + Gmail send/compose (same Google web client). */
 const MARKETPLACE_GMAIL_SCOPES = [
+  OPENID_SCOPE,
+  USERINFO_EMAIL_SCOPE,
+  USERINFO_PROFILE_SCOPE,
   GMAIL_SEND_SCOPE,
   GMAIL_READONLY_SCOPE,
   GMAIL_COMPOSE_SCOPE,
-  USERINFO_EMAIL_SCOPE,
-  USERINFO_PROFILE_SCOPE,
 ];
 
 function trimEnv(name) {
   const value = process.env[name];
   return value ? String(value).trim() : "";
+}
+
+function jwtSecret() {
+  return process.env.JWT_SECRET || "dev-secret-change-me";
 }
 
 function getOAuthConfig() {
@@ -73,7 +81,51 @@ async function consumeConnectState(token) {
   return user.uuid;
 }
 
-/** Auth URL using YOUR web OAuth client (not Apps Script default project). */
+/**
+ * Signed OAuth state for Workspace Google login / signup / Gmail-connect.
+ * All use the same redirect URI: /auth/google/callback
+ */
+function signWorkspaceGoogleState(payload) {
+  return jwt.sign(
+    {
+      typ: "workspace_google",
+      ...payload,
+      n: crypto.randomBytes(8).toString("hex"),
+    },
+    jwtSecret(),
+    { expiresIn: "15m" },
+  );
+}
+
+function verifyWorkspaceGoogleState(token) {
+  const payload = jwt.verify(String(token || ""), jwtSecret());
+  if (payload.typ !== "workspace_google") {
+    const err = new Error("Invalid workspace Google state");
+    err.code = "STATE_INVALID";
+    throw err;
+  }
+  return payload;
+}
+
+function signWorkspaceConnectTicket(uuid) {
+  return jwt.sign(
+    { typ: "workspace_gmail_connect", uuid: String(uuid) },
+    jwtSecret(),
+    { expiresIn: "5m" },
+  );
+}
+
+function verifyWorkspaceConnectTicket(token) {
+  const payload = jwt.verify(String(token || ""), jwtSecret());
+  if (payload.typ !== "workspace_gmail_connect" || !payload.uuid) {
+    const err = new Error("Invalid connect ticket");
+    err.code = "TICKET_INVALID";
+    throw err;
+  }
+  return payload;
+}
+
+/** Auth URL using YOUR web OAuth client (shared login + Gmail). */
 function getGmailAuthUrl(state) {
   const { redirectUri, clientId } = getOAuthConfig();
   const client = getOAuthClient();
@@ -110,7 +162,6 @@ function gmailClientForRefreshToken(refreshToken) {
   return google.gmail({ version: "v1", auth: client });
 }
 
-/** Mint a short-lived Gmail access token from the stored refresh token. */
 async function getGmailAccessTokenFromRefresh(refreshToken) {
   if (!refreshToken) {
     throw new Error("Gmail refresh token is missing");
@@ -130,11 +181,16 @@ async function getGmailAccessTokenFromRefresh(refreshToken) {
 
 module.exports = {
   getOAuthClient,
+  getOAuthConfig,
   getGmailAuthUrl,
   exchangeCodeForTokens,
   gmailClientForRefreshToken,
   getGmailAccessTokenFromRefresh,
   createConnectState,
   consumeConnectState,
+  signWorkspaceGoogleState,
+  verifyWorkspaceGoogleState,
+  signWorkspaceConnectTicket,
+  verifyWorkspaceConnectTicket,
   MARKETPLACE_GMAIL_SCOPES,
 };

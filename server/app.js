@@ -57,9 +57,9 @@ app.use(async (req, res, next) => {
   }
 });
 
-// Google Cloud Console redirect for Gmail connect (GOOGLE_GMAIL_REDIRECT_URI).
-// Must match env / authorized redirect URI, e.g. https://…/auth/google/callback
-app.get("/auth/google/callback", authRoutes.handleGmailOAuthCallback);
+// Workspace Google login/signup + Gmail connect (same GOOGLE_GMAIL_* client + callback).
+app.get("/auth/google/start", authRoutes.handleGoogleOAuthStart);
+app.get("/auth/google/callback", authRoutes.handleGoogleOAuthCallback);
 
 // Public APIs first — no auth middleware on this router.
 app.use("/api/public", publicRoutes);
