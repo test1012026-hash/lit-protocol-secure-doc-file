@@ -863,9 +863,39 @@ router.get("/gmail/connect", authMiddleware, async (req, res) => {
 
     const state = await createConnectState(user.uuid);
     const { url, redirectUri, clientId } = getGmailAuthUrl(state);
-    res.json({ url, redirectUri, clientId });
+    const goUrl = `${appUrl()}/api/auth/gmail/go?state=${encodeURIComponent(state)}`;
+    res.json({ url, goUrl, redirectUri, clientId });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/** Browser entry: redirect into Google OAuth (opened from the Gmail add-on). */
+router.get("/gmail/go", async (req, res) => {
+  try {
+    const state = String(req.query.state || "").trim();
+    if (!state) {
+      return res
+        .status(400)
+        .send("Missing connect state. Return to Gmail and try Encrypt & send again.");
+    }
+    const user = await User.findOne({ gmailConnectState: state });
+    if (
+      !user ||
+      !user.gmailConnectStateExpires ||
+      user.gmailConnectStateExpires.getTime() < Date.now()
+    ) {
+      return res
+        .status(400)
+        .send(
+          "Connect link expired. Return to Gmail, tap Encrypt & send, and allow Gmail again.",
+        );
+    }
+    const { url } = getGmailAuthUrl(state);
+    return res.redirect(url);
+  } catch (err) {
+    console.error("gmail/go:", err.message);
+    return res.status(500).send(err.message || "Could not start Google sign-in.");
   }
 });
 
