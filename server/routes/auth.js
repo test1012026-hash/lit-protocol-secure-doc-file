@@ -17,13 +17,11 @@ const {
   linkMicrosoftIdentity,
 } = require("../lib/emailCrypto");
 const {
-  // getGmailAuthUrl,
+  getGmailAuthUrl,
   exchangeCodeForTokens,
   getOAuthClient,
-  // createConnectState,
+  createConnectState,
   consumeConnectState,
-  // getGoogleOAuthAudience,
-  // verifyGoogleIdToken,
   getGmailAccessTokenFromRefresh,
 } = require("../lib/gmailAuth");
 const {
@@ -858,18 +856,18 @@ router.post("/gmail/mailbox-token", authMiddleware, async (req, res) => {
   }
 });
 
-// router.get("/gmail/connect", authMiddleware, async (req, res) => {
-//   try {
-//     const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
-//     if (!user) return res.status(404).json({ error: "User not found" });
+router.get("/gmail/connect", authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findOne({ uuid: req.user.uuid, claimed: true });
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-//     const state = await createConnectState(user.uuid);
-//     const { url, redirectUri, clientId } = getGmailAuthUrl(state);
-//     res.json({ url, redirectUri, clientId });
-//   } catch (err) {
-//     res.status(500).json({ error: err.message });
-//   }
-// });
+    const state = await createConnectState(user.uuid);
+    const { url, redirectUri, clientId } = getGmailAuthUrl(state);
+    res.json({ url, redirectUri, clientId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.get("/gmail/callback", async (req, res) => {
   const fail = (message) =>
@@ -921,7 +919,12 @@ router.get("/gmail/callback", async (req, res) => {
     await user.save();
 
     res.send(
-      `<html><body style="font-family:system-ui;padding:24px"><h2>Gmail connected</h2><p>Sends will appear From: <b>${getPlainEmail(user)}</b></p></body></html>`,
+      `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
+<h2 style="color:#2bb3a0">Gmail connected</h2>
+<p>Sends will appear From: <b>${getPlainEmail(user)}</b></p>
+<p>You can close this window and return to Gmail.</p>
+<script>setTimeout(function(){try{window.close();}catch(e){}},800);</script>
+</body></html>`,
     );
   } catch (err) {
     console.error("Gmail callback error:", err);
@@ -934,7 +937,13 @@ const userOAuth = require("../lib/userOAuth");
 
 async function upsertUserFromOAuth(
   profile,
-  { intent = "login", acceptTerms = false, provider = "google" } = {},
+  {
+    intent = "login",
+    acceptTerms = false,
+    provider = "google",
+    gmailRefreshToken = null,
+    gmailScopes = "",
+  } = {},
 ) {
   const email = normalizeEmail(profile.email);
   const microsoftId =
@@ -1038,6 +1047,15 @@ async function upsertUserFromOAuth(
       emails: profile.emails || [],
       primaryEmail: email,
     });
+  }
+
+  if (provider === "google") {
+    if (gmailRefreshToken) {
+      user.gmailRefreshToken = gmailRefreshToken;
+    }
+    if (gmailScopes) {
+      user.gmailScopes = mergeGrantedScopes(user.gmailScopes, gmailScopes);
+    }
   }
 
   await finalizeClaimedUser(user);
@@ -1225,6 +1243,9 @@ router.get("/oauth/:provider/callback", async (req, res) => {
       intent,
       acceptTerms,
       provider,
+      gmailRefreshToken:
+        provider === "google" ? tokens.refresh_token || null : null,
+      gmailScopes: provider === "google" ? tokens.scope || "" : "",
     });
 
     const ticket = userOAuth.signUserOAuthTicket(user.uuid);

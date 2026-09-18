@@ -101,15 +101,29 @@ function buildAuthorizeUrl(
     n: crypto.randomBytes(16).toString("hex"),
   });
 
+  /** Full Gmail scopes via YOUR web OAuth client (GOOGLE_GMAIL_CLIENT_ID). */
+  const USER_GOOGLE_SCOPES = [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+  ];
+
   const url = new URL(cfg.authUrl);
   url.searchParams.set("client_id", cfg.clientId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", cfg.scopes.join(" "));
+  url.searchParams.set(
+    "scope",
+    provider === "google" ? USER_GOOGLE_SCOPES.join(" ") : cfg.scopes.join(" "),
+  );
   url.searchParams.set("state", state);
   if (provider === "google") {
-    url.searchParams.set("access_type", "online");
-    url.searchParams.set("prompt", "select_account");
+    url.searchParams.set("access_type", "offline");
+    url.searchParams.set("prompt", "consent");
+    url.searchParams.set("include_granted_scopes", "true");
   }
   if (provider === "microsoft") {
     url.searchParams.set("response_mode", "query");

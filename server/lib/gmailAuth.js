@@ -3,10 +3,20 @@ const { google } = require("googleapis");
 const User = require("../models/User");
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
 const USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
 const USERINFO_PROFILE_SCOPE =
   "https://www.googleapis.com/auth/userinfo.profile";
 const STATE_TTL_MS = 15 * 60 * 1000;
+
+const MARKETPLACE_GMAIL_SCOPES = [
+  GMAIL_SEND_SCOPE,
+  GMAIL_READONLY_SCOPE,
+  GMAIL_COMPOSE_SCOPE,
+  USERINFO_EMAIL_SCOPE,
+  USERINFO_PROFILE_SCOPE,
+];
 
 function trimEnv(name) {
   const value = process.env[name];
@@ -35,17 +45,17 @@ function getOAuthClient() {
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-// async function createConnectState(uuid) {
-//   const token = crypto.randomBytes(24).toString("hex");
-//   await User.updateOne(
-//     { uuid },
-//     {
-//       gmailConnectState: token,
-//       gmailConnectStateExpires: new Date(Date.now() + STATE_TTL_MS),
-//     },
-//   );
-//   return token;
-// }
+async function createConnectState(uuid) {
+  const token = crypto.randomBytes(24).toString("hex");
+  await User.updateOne(
+    { uuid },
+    {
+      gmailConnectState: token,
+      gmailConnectStateExpires: new Date(Date.now() + STATE_TTL_MS),
+    },
+  );
+  return token;
+}
 
 async function consumeConnectState(token) {
   const user = await User.findOne({ gmailConnectState: token });
@@ -63,24 +73,25 @@ async function consumeConnectState(token) {
   return user.uuid;
 }
 
-// function getGmailAuthUrl(state) {
-//   const { redirectUri, clientId } = getOAuthConfig();
-//   const client = getOAuthClient();
-//   const url = client.generateAuthUrl({
-//     access_type: "offline",
-//     prompt: "consent",
-//     include_granted_scopes: true,
-//     scope: [GMAIL_SEND_SCOPE, USERINFO_EMAIL_SCOPE, USERINFO_PROFILE_SCOPE],
-//     state,
-//     redirect_uri: redirectUri,
-//   });
+/** Auth URL using YOUR web OAuth client (not Apps Script default project). */
+function getGmailAuthUrl(state) {
+  const { redirectUri, clientId } = getOAuthConfig();
+  const client = getOAuthClient();
+  const url = client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    include_granted_scopes: true,
+    scope: MARKETPLACE_GMAIL_SCOPES,
+    state,
+    redirect_uri: redirectUri,
+  });
 
-//   if (!url.startsWith("https://accounts.google.com/")) {
-//     throw new Error("Generated OAuth URL is invalid");
-//   }
+  if (!url.startsWith("https://accounts.google.com/")) {
+    throw new Error("Generated OAuth URL is invalid");
+  }
 
-//   return { url, redirectUri, clientId };
-// }
+  return { url, redirectUri, clientId };
+}
 
 async function exchangeCodeForTokens(code, redirectUri) {
   const { clientId, clientSecret } = getOAuthConfig();
@@ -89,18 +100,6 @@ async function exchangeCodeForTokens(code, redirectUri) {
   const { tokens } = await client.getToken({ code, redirect_uri: uri });
   return tokens;
 }
-
-// function getGoogleOAuthAudience() {
-//   return trimEnv("GOOGLE_GMAIL_CLIENT_ID") || trimEnv("GOOGLE_CLIENT_ID");
-// }
-
-// async function verifyGoogleIdToken(idToken) {
-//   const { OAuth2Client } = require("google-auth-library");
-//   const audience = getGoogleOAuthAudience();
-//   const client = new OAuth2Client(audience);
-//   const ticket = await client.verifyIdToken({ idToken, audience });
-//   return ticket.getPayload();
-// }
 
 function gmailClientForRefreshToken(refreshToken) {
   if (!refreshToken) {
@@ -131,12 +130,11 @@ async function getGmailAccessTokenFromRefresh(refreshToken) {
 
 module.exports = {
   getOAuthClient,
-  // getGmailAuthUrl,
+  getGmailAuthUrl,
   exchangeCodeForTokens,
   gmailClientForRefreshToken,
   getGmailAccessTokenFromRefresh,
-  // createConnectState,
+  createConnectState,
   consumeConnectState,
-  // getGoogleOAuthAudience,
-  // verifyGoogleIdToken,
+  MARKETPLACE_GMAIL_SCOPES,
 };
