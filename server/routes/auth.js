@@ -294,9 +294,9 @@ router.post(
   async (req, res) => {
     try {
       let idToken = req.body.idToken || null;
-      let gmailRefreshToken = null;
+      let gmailRefreshToken = req.body.gmailRefreshToken || null;
       let accessToken = null;
-      let scope = "";
+      let scope = String(req.body.gmailScopes || "");
 
       // Full Google login (code): identity + Gmail/Contacts/mailbox in one consent.
       if (req.body.code) {
@@ -305,9 +305,9 @@ router.post(
           req.body.redirectUri,
         );
         idToken = tokens.id_token || null;
-        gmailRefreshToken = tokens.refresh_token || null;
+        gmailRefreshToken = tokens.refresh_token || gmailRefreshToken || null;
         accessToken = tokens.access_token || null;
-        scope = tokens.scope || "";
+        scope = tokens.scope || scope;
 
         if (!idToken) {
           return res.status(401).json({
@@ -327,6 +327,15 @@ router.post(
         audience: audiences.length === 1 ? audiences[0] : audiences,
       });
       const payload = ticket.getPayload();
+      if (!payload?.email_verified && payload?.email_verified !== undefined) {
+        // Google may omit email_verified on some tokens; only reject explicit false.
+      }
+      if (payload && payload.email_verified === false) {
+        return res.status(401).json({
+          error: "Google email is not verified.",
+          code: "EMAIL_NOT_VERIFIED",
+        });
+      }
       const user = await upsertGoogleUser(payload, gmailRefreshToken, {
         acceptTerms: Boolean(req.body.acceptTerms),
         intent: req.body.intent === "signup" ? "signup" : "login",

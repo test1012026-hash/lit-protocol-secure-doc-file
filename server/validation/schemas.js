@@ -47,6 +47,9 @@ const googleLoginSchema = z
     idToken: z.string().min(20).optional(),
     code: z.string().min(10).optional(),
     redirectUri: z.string().min(8, "redirectUri is required").optional(),
+    /** Offline refresh token from Apps Script OAuth2 (Workspace Google login). */
+    gmailRefreshToken: z.string().min(10).optional(),
+    gmailScopes: z.string().optional(),
     acceptTerms: z.boolean().optional().default(false),
     intent: z.enum(["login", "signup"]).optional().default("login"),
   })
