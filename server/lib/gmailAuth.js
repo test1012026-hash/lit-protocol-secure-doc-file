@@ -29,7 +29,7 @@ function getOAuthConfig() {
   const clientSecret = trimEnv("GOOGLE_GMAIL_CLIENT_SECRET");
   const redirectUri =
     trimEnv("GOOGLE_GMAIL_REDIRECT_URI") ||
-    `${(trimEnv("APP_URL") || "http://localhost:4000").replace(/\/$/, "")}/api/auth/gmail/callback`;
+    `${(trimEnv("APP_URL") || "http://localhost:4000").replace(/\/$/, "")}/auth/google/callback`;
 
   if (!clientId || !clientSecret) {
     throw new Error(

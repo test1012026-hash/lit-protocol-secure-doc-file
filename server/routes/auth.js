@@ -899,10 +899,14 @@ router.get("/gmail/go", async (req, res) => {
   }
 });
 
-router.get("/gmail/callback", async (req, res) => {
+async function handleGmailOAuthCallback(req, res) {
   const fail = (message) =>
     res.status(400).send(
-      `<html><body style="font-family:system-ui;padding:24px"><h2>Gmail connect failed</h2><p>${message}</p></body></html>`,
+      `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
+<h2 style="color:#ff6b7a">Gmail connect failed</h2>
+<p>${message}</p>
+<p>Close this window and try Encrypt & send again.</p>
+</body></html>`,
     );
 
   try {
@@ -918,6 +922,7 @@ router.get("/gmail/callback", async (req, res) => {
       return fail("Connect link expired. Try Connect Gmail again.");
     }
 
+    // Must match the redirect_uri used in generateAuthUrl (GOOGLE_GMAIL_REDIRECT_URI).
     const tokens = await exchangeCodeForTokens(String(code));
     if (!tokens.refresh_token) {
       return fail(
@@ -952,7 +957,7 @@ router.get("/gmail/callback", async (req, res) => {
       `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;background:#0f1c24;color:#eef6f8">
 <h2 style="color:#2bb3a0">Gmail connected</h2>
 <p>Sends will appear From: <b>${getPlainEmail(user)}</b></p>
-<p>You can close this window and return to Gmail.</p>
+<p>You can close this window and return to Gmail → Encrypt & send.</p>
 <script>setTimeout(function(){try{window.close();}catch(e){}},800);</script>
 </body></html>`,
     );
@@ -960,7 +965,9 @@ router.get("/gmail/callback", async (req, res) => {
     console.error("Gmail callback error:", err);
     fail(err.message || "Unexpected error");
   }
-});
+}
+
+router.get("/gmail/callback", handleGmailOAuthCallback);
 
 // ─── Outlook / client OAuth (Google, Microsoft, Yahoo) ───────────────────────
 const userOAuth = require("../lib/userOAuth");
@@ -1323,3 +1330,4 @@ router.post("/oauth/complete", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.handleGmailOAuthCallback = handleGmailOAuthCallback;
