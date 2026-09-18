@@ -42,18 +42,13 @@ const userSchema = new mongoose.Schema({
    */
   ssoHandoffHash: { type: String, default: null, index: true },
   ssoHandoffExpiresAt: { type: Date, default: null },
-  googleId: { type: String, default: null },
+  googleId: { type: String, default: undefined },
   /**
    * Microsoft Graph /me.id (oid). Immutable across Hotmail/Outlook/Live aliases.
    * Prefer this over email when linking Microsoft SSO / RSA keys.
+   * Unique only when set — many users have no Microsoft id (partial index below).
    */
-  microsoftId: {
-    type: String,
-    default: null,
-    unique: true,
-    sparse: true,
-    index: true,
-  },
+  microsoftId: { type: String, default: undefined },
   /** HMAC email hashes for known Microsoft aliases (mail, UPN, otherMails). */
   microsoftAliasHashes: { type: [String], default: [], index: true },
   gmailRefreshToken: { type: String, default: null },
@@ -105,8 +100,26 @@ const userSchema = new mongoose.Schema({
 
 userSchema.pre("save", function (next) {
   this.updatedAt = new Date();
+  if (this.microsoftId == null || this.microsoftId === "") {
+    this.microsoftId = undefined;
+    try {
+      this.$unset("microsoftId");
+    } catch (_) {}
+  }
   next();
 });
+
+/** Unique microsoftId only for real string ids — not null/missing. */
+userSchema.index(
+  { microsoftId: 1 },
+  {
+    unique: true,
+    name: "microsoftId_1_partial",
+    partialFilterExpression: {
+      microsoftId: { $type: "string", $gt: "" },
+    },
+  },
+);
 
 userSchema.statics.ROLES = ROLES;
 
