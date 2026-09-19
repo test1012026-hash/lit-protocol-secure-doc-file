@@ -14,6 +14,32 @@ const {
 const { sha256Hex } = require("./secureCrypto");
 
 const META_TOKEN_PREFIX = "sdmeta.v1.";
+const SITE_URL =
+  (process.env.ADMIN_APP_PUBLIC_URL ||
+    process.env.ADMIN_APP_URL ||
+    "https://admin-panel-amber-nine.vercel.app")
+    .replace(/\/$/, "")
+    .replace(/^http:\/\/localhost(:\d+)?$/i, "https://admin-panel-amber-nine.vercel.app");
+
+const SITE_FOOTER_TEXT =
+  "To know more, visit our website: " + SITE_URL;
+
+function siteFooterText() {
+  return SITE_FOOTER_TEXT;
+}
+
+function siteFooterHtml() {
+  return (
+    '<div style="margin:14px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#475569">' +
+    'To know more, visit our website: ' +
+    '<a href="' +
+    escapeHtml(SITE_URL) +
+    '" style="color:#0F766E;font-weight:600;text-decoration:underline" target="_blank" rel="noopener noreferrer">' +
+    escapeHtml(SITE_URL) +
+    "</a>" +
+    "</div>"
+  );
+}
 
 function escapeHtml(s) {
   return String(s || "")
@@ -33,7 +59,7 @@ function formatMailMetadataHtml(meta) {
   const emailEnc = String(m.emailEnc || "").trim();
   const uuidEnc = String(m.uuidEnc || "").trim();
   const notice = String(m.mismatchNotice || "").trim();
-  if (!token && !emailEnc && !uuidEnc) return "";
+  if (!token && !emailEnc && !uuidEnc) return siteFooterHtml();
 
   return [
     '<div style="margin:16px 0 0 0;padding:12px 0 0 0;border-top:2px solid #0F766E;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">',
@@ -51,6 +77,7 @@ function formatMailMetadataHtml(meta) {
       ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0;word-break:break-all">uuid: ${escapeHtml(uuidEnc)}</div>`
       : "",
     "</div>",
+    siteFooterHtml(),
   ].join("");
 }
 
@@ -93,6 +120,8 @@ function buildMailMetadata({ email, uuid, messageUuidHash = null }) {
     "email: " + emailEnc,
     "uuid: " + uuidEnc,
     hashMismatch ? "error: " + mismatchNotice : "",
+    "",
+    SITE_FOOTER_TEXT,
     "",
   ]
     .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
@@ -227,8 +256,11 @@ function parseMailMetadata(raw) {
 
 module.exports = {
   META_TOKEN_PREFIX,
+  SITE_URL,
   buildMailMetadata,
   parseMailMetadata,
   extractMetaToken,
   formatMailMetadataHtml,
+  siteFooterText,
+  siteFooterHtml,
 };

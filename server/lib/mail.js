@@ -265,6 +265,7 @@ async function sendEncryptedFileEmail({
       : "",
     openUrl ? `\nOpen extension: ${openUrl}` : "",
     metaText ? `\n${metaText}` : "",
+    metaText ? "" : "\nTo know more, visit our website: https://admin-panel-amber-nine.vercel.app",
   ]
     .filter(Boolean)
     .join("\n");
@@ -303,7 +304,7 @@ ${openButton}
 <p style="color:gray">${
    "Only the recipient account can decrypt this file."
   }</p> <br/><br/>
-${metaHtml}
+${metaHtml || '<div style="margin:14px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#475569">To know more, visit our website: <a href="https://admin-panel-amber-nine.vercel.app" style="color:#0F766E;font-weight:600" target="_blank" rel="noopener noreferrer">https://admin-panel-amber-nine.vercel.app</a></div>'}
 `;
 
   await sendEmail({
