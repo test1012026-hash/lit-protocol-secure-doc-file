@@ -128,8 +128,9 @@ export function buildEmailBodies({
   ${meta.token ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0 0 4px 0;word-break:break-all">${escapeHtml(meta.token)}</div>` : ""}
   ${meta.emailEnc ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0 0 4px 0;word-break:break-all">email: ${escapeHtml(meta.emailEnc)}</div>` : ""}
   ${meta.uuidEnc ? `<div style="font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.5;margin:0;word-break:break-all">uuid: ${escapeHtml(meta.uuidEnc)}</div>` : ""}
-</div>`
-    : "";
+</div>
+<div style="margin:14px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#475569">To know more, visit our website: <a href="https://admin-panel-amber-nine.vercel.app" style="color:#0F766E;font-weight:600;text-decoration:underline" target="_blank" rel="noopener noreferrer">https://admin-panel-amber-nine.vercel.app</a></div>`
+    : `<div style="margin:14px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#475569">To know more, visit our website: <a href="https://admin-panel-amber-nine.vercel.app" style="color:#0F766E;font-weight:600;text-decoration:underline" target="_blank" rel="noopener noreferrer">https://admin-panel-amber-nine.vercel.app</a></div>`;
 
   const openButton = openUrl
     ? `<p><a href="${openUrl}" style="display:inline-block;padding:12px 24px;background:#2bb3a0;color:#ffffff;font-weight:700;text-decoration:none;border-radius:8px;font-size:14px">Open SecureDocShare</a></p>`
@@ -148,6 +149,8 @@ export function buildEmailBodies({
       : "",
     openUrl ? `\nOpen extension: ${openUrl}` : "",
     metaText ? `\n${metaText}` : "",
+    "",
+    "To know more, visit our website: https://admin-panel-amber-nine.vercel.app",
   ]
     .filter(Boolean)
     .join("\n");
